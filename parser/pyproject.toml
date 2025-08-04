@@ -1,0 +1,22 @@
+[project]
+name = "parser"
+version = "0.1.0"
+description = "CLI for parsing"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "typer",
+    "beautifulsoup4",
+    "pdfplumber",
+    "requests",
+    "python-dotenv",
+    "datasets"
+]
+
+[project.optional-dependencies]  # pip install -e ".[dev]"
+dev = [
+    "ruff",
+]
+
+[project.scripts]
+parser = "parser.cli:app"

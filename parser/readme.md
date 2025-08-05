@@ -31,9 +31,20 @@ Output:
 
 Run
 ```
-parser geokniga 1 5
+parser run geokniga 1 5
 ```
 which means that we need to parse first page of query and first 5 available files
+
+
+Just search. Results are saved in `geosearch.json`
+```
+parser search geokniga
+```
+
+Just download
+```
+parser dload "path/to/geosearch.json"
+```
 
 
 Results are stored in `results` directory

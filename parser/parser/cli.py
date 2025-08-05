@@ -26,5 +26,23 @@ def run(
     parser.run()
 
 
-    # logger.save_json
+@app.command()
+def search(
+    source: str = typer.Argument(help="Source to parse"),
+):
+    """Run search for books"""
+    logger = Logger.create(
+        source=source
+    )
+    logger.info(f"Search in {source} has started")
 
+
+@app.command()
+def dload(
+    search_results: str = typer.Argument(help="Source to search results"),
+):
+    """Run download of found books"""
+    logger = Logger.create(
+        source='source'
+    )
+    logger.info("Download initiated")

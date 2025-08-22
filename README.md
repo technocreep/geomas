@@ -29,7 +29,7 @@ Model could be any of:
 ## Supervised fine-tuning
 
 
-# Clean code recipie
+# Clean code recipe
 
 ```cmd
 make lint    # Check code with Ruff

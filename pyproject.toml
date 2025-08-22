@@ -1,0 +1,20 @@
+[project]
+name = "geomas"
+version = "0.1.0"
+description = "Tool for model training"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "typer",
+]
+
+[tool.setuptools]
+packages = ["geomas"]
+
+[project.optional-dependencies]  # pip install -e ".[dev]"
+dev = [
+    "ruff",
+]
+
+[project.scripts]
+geomas = "geomas.cli:app"

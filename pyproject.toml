@@ -14,7 +14,11 @@ packages = ["geomas"]
 [project.optional-dependencies]  # pip install -e ".[dev]"
 dev = [
     "ruff",
+    "pytest"
 ]
+
+[tool.ruff.lint]
+ignore = ["E501", "F401"]  # Ignore long lines and unused imports
 
 [project.scripts]
 geomas = "geomas.cli:app"

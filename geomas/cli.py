@@ -16,7 +16,8 @@ def train(
 	dataset_name = dataset_path.split('/')[-1]
 	logger.info(f"Training model '{model}' on dataset '{dataset_name}'")
 
-	result = cpt_train(model, dataset_path)
+	cpt_train(model, dataset_path)
+	
 	logger.info('>>>>>> training finished <<<<<<<')
 
 

@@ -1,15 +1,13 @@
 from pathlib import Path
+from typing import Optional
+
 from unsloth import FastLanguageModel
 import torch
-from datasets import load_dataset
-from trl import SFTTrainer
-from transformers import TrainingArguments
 from unsloth import is_bfloat16_supported
 from unsloth import UnslothTrainer, UnslothTrainingArguments
 from transformers import TextIteratorStreamer
 from threading import Thread
 import textwrap
-import sys
 import os
 
 from geomas.core.logger import get_logger
@@ -27,112 +25,137 @@ MODEL_MAP = {
 }
 
 
-def cpt_train(
-        model_name: str,
-        dataset_path: Path,
-        infer_at_once: bool = False,
-        quantization_mode: str = "fast_quantized"
-):
-    logger.info('CPT Started')
-    logger.info(f'Model - {model_name}')
-    logger.info(f'Dataset path: {dataset_path}')
-    
-    if not model:
-        logger.error(f'Model <{model_name}> is wrong. Available: {MODEL_MAP.keys()}')
-        return
+class CPTTrainer:
+    def __init__(self,
+                 model_name: str,
+                 dataset_path: Path,
+                 infer_at_once: bool = False,
+                 quantization_mode: str = "fast_quantized") -> None:
+        self.model_name = model_name
+        self.dataset_path = dataset_path
+        self.infer_at_once = infer_at_once
+        self.quantization_mode = quantization_mode
 
-    _model = MODEL_MAP[model_name]
+        self._resolved_model_name: Optional[str] = None
+        self.model = None
+        self.tokenizer = None
+        self.dataset = None
+        self.trainer = None
 
-    max_seq_length = 2048
-    dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
-    load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
+        self.max_seq_length = 2048
+        self.dtype = None
+        self.load_in_4bit = True
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name = _model, # "unsloth/mistral-7b" for 16bit loading
-        max_seq_length = max_seq_length,
-        dtype = dtype,
-        load_in_4bit = load_in_4bit,
-        # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
-    )
-    
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r = 128, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
-        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj",
+    def _validate_and_resolve_model(self) -> None:
+        if self.model_name not in MODEL_MAP:
+            logger.error(f"Model <{self.model_name}> is wrong. Available: {list(MODEL_MAP.keys())}")
+            raise ValueError(f"Unknown model name: {self.model_name}")
+        self._resolved_model_name = MODEL_MAP[self.model_name]
+        logger.info("CPT Started")
+        logger.info(f"Model: {self.model_name}")
+        logger.info(f"Dataset path: {self.dataset_path}")
 
-                        "embed_tokens", "lm_head",], # Add for continual pretraining
-        lora_alpha = 32,
-        lora_dropout = 0, # Supports any, but = 0 is optimized
-        bias = "none",    # Supports any, but = "none" is optimized
-        # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
-        use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
-        random_state = 3407,
-        use_rslora = True,  # We support rank stabilized LoRA
-        loftq_config = None, # And LoftQ
-    )
+    def _load_model_and_tokenizer(self) -> None:
+        model, tokenizer = FastLanguageModel.from_pretrained(model_name=self._resolved_model_name,
+                                                             max_seq_length=self.max_seq_length,
+                                                             dtype=self.dtype,
+                                                             load_in_4bit=self.load_in_4bit)
+        self.model, self.tokenizer = model, tokenizer
 
-    # TODO: implement custom loader for JSON texts
-    dataset = get_dataset(dataset_path)
+    def _apply_lora(self) -> None:
+        self.model = FastLanguageModel.get_peft_model(self.model,
+                                                      r=128,
+                                                      target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                                                                      "gate_proj", "up_proj", "down_proj",
+                                                                      "embed_tokens", "lm_head",],
+                                                      lora_alpha=32,
+                                                      lora_dropout=0,
+                                                      bias="none",
+                                                      use_gradient_checkpointing="unsloth",
+                                                      random_state=3407,
+                                                      use_rslora=True,
+                                                      loftq_config=None)
 
-    EOS_TOKEN = tokenizer.eos_token
-    
-    def formatting_prompts_func(examples):
-        return { "text" : [example + EOS_TOKEN for example in examples["text"]] }
-    
-    dataset = dataset.map(formatting_prompts_func, batched = True,)
+    def _load_dataset(self) -> None:
+        dataset = get_dataset(self.dataset_path)
+        eos_token = self.tokenizer.eos_token
 
-    logger.debug("Dataset samples:")
-    for row in dataset[:2]["text"]:
-        logger.debug(row)
+        def _formatting_prompts_func(examples):
+            return {"text": [example + eos_token for example in examples["text"]]}
 
+        self.dataset = dataset.map(_formatting_prompts_func, batched=True)
+        logger.debug("Dataset samples:")
+        for row in self.dataset[:2]["text"]:
+            logger.debug(row)
 
+    def _build_trainer(self) -> None:
+        self.trainer = UnslothTrainer(model=self.model,
+                                      tokenizer=self.tokenizer,
+                                      train_dataset=self.dataset,
+                                      dataset_text_field="text",
+                                      max_seq_length=self.max_seq_length,
+                                      dataset_num_proc=8,
+                                      args=UnslothTrainingArguments(per_device_train_batch_size=2,
+                                                                    gradient_accumulation_steps=8,
+                                                                    warmup_ratio=0.1,
+                                                                    num_train_epochs=1,
+                                                                    learning_rate=5e-5,
+                                                                    embedding_learning_rate=5e-6,
+                                                                    fp16=not is_bfloat16_supported(),
+                                                                    bf16=is_bfloat16_supported(),
+                                                                    logging_steps=1,
+                                                                    optim="adamw_8bit",
+                                                                    weight_decay=0.00,
+                                                                    lr_scheduler_type="cosine",
+                                                                    seed=3407,
+                                                                    output_dir="outputs",
+                                                                    report_to="none",))
 
-    trainer = UnslothTrainer(
-        model = model,
-        tokenizer = tokenizer,
-        train_dataset = dataset,
-        dataset_text_field = "text",
-        max_seq_length = max_seq_length,
-        dataset_num_proc = 8,
+    def _train(self) -> any:
+        logger.info("TRAINING ...")
+        trainer_stats = self.trainer.train()
+        return trainer_stats
 
-        args = UnslothTrainingArguments(
-            per_device_train_batch_size = 2,
-            gradient_accumulation_steps = 8,
+    def _save(self, save_dir: str) -> None:
+        os.makedirs(save_dir, exist_ok=True)
+        logger.info(f"Saving model <{self._resolved_model_name}> to: <{save_dir}>")
+        self.model.save_pretrained_gguf(save_dir, self.tokenizer, quantization_method=self.quantization_mode)
 
-            warmup_ratio = 0.1,
-            num_train_epochs = 1,
+    def _infer(self) -> None:
+        pass
 
-            learning_rate = 5e-5,
-            embedding_learning_rate = 5e-6,
+    def run(self, save_dir: Optional[str] = None) -> None:
+        self._validate_and_resolve_model()
+        self._load_model_and_tokenizer()
+        self._apply_lora()
+        self._load_dataset()
+        self._build_trainer()
 
-            fp16 = not is_bfloat16_supported(),
-            bf16 = is_bfloat16_supported(),
-            logging_steps = 1,
-            optim = "adamw_8bit",
-            weight_decay = 0.00,
-            lr_scheduler_type = "cosine",
-            seed = 3407,
-            output_dir = "outputs",
-            report_to = "none", # TODO: Use this for WandB etc
-        ),
-    )
+        start_gpu_memory, max_memory = _log_pre_training_report()
+        trainer_stats = self._train()
+        _log_post_training_report(trainer_stats, start_gpu_memory, max_memory)
 
+        if save_dir:
+            self._save(save_dir)
+
+        if self.infer_at_once:
+            self._infer()
+
+def _log_pre_training_report() -> tuple[float, float]:
     logger.info("Pre-Training report >>> ")
     gpu_stats = torch.cuda.get_device_properties(0)
     start_gpu_memory = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
     max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
     logger.info(f"GPU = {gpu_stats.name}. Max memory = {max_memory} GB.")
     logger.info(f"{start_gpu_memory} GB of memory reserved.")
+    return start_gpu_memory, max_memory
 
-    logger.info("TRAINING ...")
-    trainer_stats = trainer.train()
-
+def _log_post_training_report(trainer_stats, start_gpu_memory: float, max_memory: float) -> None:
     logger.info("After-Training report >>>")
     used_memory = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
     used_memory_for_lora = round(used_memory - start_gpu_memory, 3)
-    used_percentage = round(used_memory         /max_memory*100, 3)
-    lora_percentage = round(used_memory_for_lora/max_memory*100, 3)
+    used_percentage = round(used_memory / max_memory * 100, 3)
+    lora_percentage = round(used_memory_for_lora / max_memory * 100, 3)
     logger.info(f"{trainer_stats.metrics['train_runtime']} seconds used for training.")
     logger.info(f"{round(trainer_stats.metrics['train_runtime']/60, 2)} minutes used for training.")
     logger.info(f"Peak reserved memory = {used_memory} GB.")
@@ -140,42 +163,48 @@ def cpt_train(
     logger.info(f"Peak reserved memory % of max memory = {used_percentage} %.")
     logger.info(f"Peak reserved memory for training % of max memory = {lora_percentage} %.")
 
-    save_directory = PROJECT_PATH + "/" + "models"
-    os.makedirs(save_directory, exist_ok=True)
-    logger.info(f'Saving model <{_model}> to: <{save_directory}>')
-    model.save_pretrained_gguf("directory", tokenizer, quantization_method = quantization_mode)
+# TODO: remove mock infer method
+def mock_infer(self):
+    text_streamer = TextIteratorStreamer(self.tokenizer)
+    max_print_width = 100
 
-    if infer_at_once:
-        text_streamer = TextIteratorStreamer(tokenizer)
-        max_print_width = 100
-
-        inputs = tokenizer(
+    inputs = self.tokenizer(
         [
-            "На рудном поле преобладают разломы северо-восточного и северо-западного направлений, \
-             в меньшей степени развиты"
-        ]*1, return_tensors = "pt").to("cuda")
+            "На рудном поле преобладают разломы северо-восточного и северо-западного направлений,"
+            "в меньшей степени развиты"
+        ]
+        * 1,
+        return_tensors="pt",
+    ).to("cuda")
 
-        generation_kwargs = dict(
-            inputs,
-            streamer = text_streamer,
-            max_new_tokens = 256,
-            use_cache = True,
-        )
-        thread = Thread(target = model.generate, kwargs = generation_kwargs)
-        thread.start()
+    generation_kwargs = dict(inputs, streamer=text_streamer, max_new_tokens=256, use_cache=True)
+    thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
+    thread.start()
 
-        length = 0
-        for j, new_text in enumerate(text_streamer):
-            if j == 0:
-                wrapped_text = textwrap.wrap(new_text, width = max_print_width)
-                length = len(wrapped_text[-1])
-                wrapped_text = "\n".join(wrapped_text)
-                print(wrapped_text, end = "")
-            else:
-                length += len(new_text)
-                if length >= max_print_width:
-                    length = 0
-                    print()
-                print(new_text, end = "")
-            pass
-        pass
+    length = 0
+    for j, new_text in enumerate(text_streamer):
+        if j == 0:
+            wrapped_text = textwrap.wrap(new_text, width=max_print_width)
+            length = len(wrapped_text[-1])
+            wrapped_text = "\n".join(wrapped_text)
+            print(wrapped_text, end="")
+        else:
+            length += len(new_text)
+            if length >= max_print_width:
+                length = 0
+                print()
+            print(new_text, end="")
+
+# TODO: remove backwards compatability method
+def cpt_train(model_name: str,
+              dataset_path: Path,
+              infer_at_once: bool = False,
+              quantization_mode: str = "fast_quantized"):
+    trainer = CPTTrainer(model_name=model_name,
+                         dataset_path=dataset_path,
+                         infer_at_once=infer_at_once,
+                         quantization_mode=quantization_mode)
+    trainer._infer = mock_infer
+
+    save_dir = PROJECT_PATH + "/" + "models"
+    trainer.run(save_dir=save_dir)

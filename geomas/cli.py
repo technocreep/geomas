@@ -1,7 +1,7 @@
 import typer
 from geomas.core.logger import get_logger
 import os
-from geomas.core.utils import ALLOWED_QUANTS
+from geomas.core.utils import ALLOWED_QUANTS, ALLOWED_MODELS
 from geomas.core.utils import PROJECT_PATH
 from geomas.core.pdf_to_json import process_folder
 
@@ -19,16 +19,21 @@ def train(
 	"""Run Training"""
 	# set up CUDA device
 	from geomas.core.continued_pretrain import cpt_train
-	os.environ["CUDA_VISIBLE_DEVICES"] = device
+	os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+
+	model_name = ALLOWED_MODELS.get(model, None)
+	if not model:
+		logger.error(f'Model <{model}> is wrong. Available: {ALLOWED_MODELS.keys()}')
+		return
 	
 	dataset_name = dataset_path.split('/')[-1]
 	
-	logger.info(f"Training model '{model}' on dataset '{dataset_name}'")
+	logger.info(f"Training model '{model_name}' on dataset '{dataset_name}'")
 	logger.info(f"CUDA device <{device}> is selected")
 
 	
 	cpt_train(
-		model_name=model, 
+		model_name=model_name, 
 		dataset_path=dataset_path,
 		quantization_mode=quantization_mode)
 	

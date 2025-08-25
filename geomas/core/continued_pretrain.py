@@ -19,13 +19,6 @@ from geomas.core.utils import PROJECT_PATH
 logger = get_logger()
 
 
-MODEL_MAP = {
-    "gpt-oss": "unsloth/gpt-oss-20b",
-    "gemma-3n": "unsloth/gemma-3n-E4B-unsloth-bnb-4bit",
-    "mistral-7b": "mistral-7b-v0.3-bnb-4bit",
-    "gemma-7b": "gemma-7b-bnb-4bit",
-}
-
 
 def cpt_train(
         model_name: str,
@@ -36,19 +29,13 @@ def cpt_train(
     logger.info('CPT Started')
     logger.info(f'Model - {model_name}')
     logger.info(f'Dataset path: {dataset_path}')
-    
-    if not model:
-        logger.error(f'Model <{model_name}> is wrong. Available: {MODEL_MAP.keys()}')
-        return
-
-    _model = MODEL_MAP[model_name]
 
     max_seq_length = 2048
     dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
     load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name = _model, # "unsloth/mistral-7b" for 16bit loading
+        model_name = model_name, # "unsloth/mistral-7b" for 16bit loading
         max_seq_length = max_seq_length,
         dtype = dtype,
         load_in_4bit = load_in_4bit,
@@ -139,7 +126,7 @@ def cpt_train(
 
     save_directory = PROJECT_PATH + "/" + "models"
     os.makedirs(save_directory, exist_ok=True)
-    logger.info(f'Saving model <{_model}> to: <{save_directory}>')
+    logger.info(f'Saving model <{model_name}> to: <{save_directory}>')
     model.save_pretrained_gguf("directory", tokenizer, quantization_method = quantization_mode)
 
     if infer_at_once:

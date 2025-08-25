@@ -72,7 +72,6 @@ def cpt_train(
         loftq_config = None, # And LoftQ
     )
 
-    # TODO: implement custom loader for JSON texts
     dataset = get_dataset(dataset_path)
 
     EOS_TOKEN = tokenizer.eos_token
@@ -85,8 +84,6 @@ def cpt_train(
     logger.debug("Dataset samples:")
     for row in dataset[:2]["text"]:
         logger.debug(row)
-
-
 
     trainer = UnslothTrainer(
         model = model,

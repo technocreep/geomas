@@ -2,6 +2,7 @@ import logging
 import logging.handlers
 import os
 from datetime import datetime
+from geomas.core.utils import PROJECT_PATH
 
 _LOG_FILE_NAME = None
 
@@ -32,7 +33,7 @@ def get_logger(
     backup_count: int = 3,
 ) -> logging.Logger:
     global _LOG_FILE_NAME
-
+    log_dir = PROJECT_PATH + "/" + log_dir
     os.makedirs(log_dir, exist_ok=True)
 
     if _LOG_FILE_NAME is None:
@@ -40,6 +41,7 @@ def get_logger(
         _LOG_FILE_NAME = os.path.join(log_dir, f"geomas_launch_{current_time}.log")
 
     logger = logging.getLogger(logger_name)
+    logger.propagate = False
     logger.setLevel(level)
 
     if not logger.handlers:

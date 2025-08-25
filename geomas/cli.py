@@ -13,7 +13,7 @@ logger = get_logger()
 def train(
 	model: str = typer.Argument(help="Model to train"),
 	dataset_path: str = typer.Argument(help="Path to dataset"),
-	device: int = typer.Argument(help="Number of GPU device to compute on", default=0),
+	device: int = typer.Argument(help="Index of GPU device to compute on"),
 	quantization_mode: str = typer.Argument(help=f"Allowed methods: {ALLOWED_QUANTS}", default="fast_quantized")
 	):
 	"""Run Training"""
@@ -62,18 +62,20 @@ def health():
 	logger.info("Checking core libs...")
 	try:
 		import torch, platform, unsloth
-		logger.info("="*30)
 		logger.info("Running sanity check...")
-		logger.info("Python version:", platform.python_version())
-		logger.info("Torch version:", torch.__version__)
-		logger.info("Unsloth version:", unsloth.__version__)
-		logger.info("="*30)
-
-		logger.info("CUDA available:", torch.cuda.is_available())
+		logger.info(f"Python version: {platform.python_version()}")
+		logger.info(f"Torch version: {torch.__version__}")
+		logger.info(f"Unsloth version: {unsloth.__version__}")
+		logger.info(f"CUDA available: {torch.cuda.is_available()}")
 		if torch.cuda.is_available():
-			logger.info("Device:", torch.cuda.get_device_name(0))
+			logger.info(f"Available devices: {torch.cuda.device_count()}")
+			for device in range(torch.cuda.device_count()):
+				logger.info(f"Device #{device}: {torch.cuda.get_device_name(device)}")
 	except Exception as e:
 		logger.info("Caught exception:")
 		logger.info(e)
-	logger.info("="*30)
 	logger.info("Sanity check finished")
+
+
+if __name__ == "__main__":
+	health()

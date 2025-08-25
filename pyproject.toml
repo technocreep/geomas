@@ -14,7 +14,8 @@ packages = ["geomas"]
 [project.optional-dependencies]  # pip install -e ".[dev]"
 dev = [
     "ruff",
-    "pytest"
+    "pytest",
+    "PyPDF2"
 ]
 
 [tool.ruff.lint]

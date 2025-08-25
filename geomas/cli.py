@@ -1,6 +1,7 @@
 import typer
 from geomas.core.logger import get_logger
-from geomas.core.continued_pretrain import cpt_train
+import os
+from geomas.core.utils import ALLOWED_QUANTS
 
 app = typer.Typer(help="GEOMAS: CLI tool for LLM Training")
 logger = get_logger()
@@ -9,14 +10,24 @@ logger = get_logger()
 def train(
 	model: str = typer.Argument(help="Model to train"),
 	dataset_path: str = typer.Argument(help="Path to dataset"),
-
+	device: int = typer.Argument(help="Number of GPU device to compute on", default=0),
+	quantization_mode: str = typer.Argument(help=f"Allowed methods: {ALLOWED_QUANTS}", default="fast_quantized")
 	):
 	"""Run Training"""
-
+	# set up CUDA device
+	os.environ["CUDA_VISIBLE_DEVICES"] = device
+	
 	dataset_name = dataset_path.split('/')[-1]
+	
 	logger.info(f"Training model '{model}' on dataset '{dataset_name}'")
+	logger.info(f"CUDA device <{device}> is selected")
 
-	cpt_train(model, dataset_path)
+	from geomas.core.continued_pretrain import cpt_train
+	
+	cpt_train(
+		model_name=model, 
+		dataset_path=dataset_path,
+		quantization_mode=quantization_mode)
 	
 	logger.info('>>>>>> training finished <<<<<<<')
 

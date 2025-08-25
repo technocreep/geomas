@@ -14,6 +14,7 @@ import os
 
 from geomas.core.logger import get_logger
 from geomas.core.dataset import get_dataset
+from geomas.core.utils import PROJECT_PATH
 
 logger = get_logger()
 
@@ -27,24 +28,27 @@ MODEL_MAP = {
 
 
 def cpt_train(
-        model: str,
+        model_name: str,
         dataset_path: Path,
-        infer_at_once: bool = False
+        infer_at_once: bool = False,
+        quantization_mode: str = "fast_quantized"
 ):
     logger.info('CPT Started')
-    logger.info(f'Model - {model}')
+    logger.info(f'Model - {model_name}')
     logger.info(f'Dataset path: {dataset_path}')
     
     if not model:
-        logger.error(f'Model <{model}> is wrong. Available: {MODEL_MAP.keys()}')
+        logger.error(f'Model <{model_name}> is wrong. Available: {MODEL_MAP.keys()}')
         return
 
-    max_seq_length = 2048 # Choose any! We auto support RoPE Scaling internally!
+    _model = MODEL_MAP[model_name]
+
+    max_seq_length = 2048
     dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
     load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name = model, # "unsloth/mistral-7b" for 16bit loading
+        model_name = _model, # "unsloth/mistral-7b" for 16bit loading
         max_seq_length = max_seq_length,
         dtype = dtype,
         load_in_4bit = load_in_4bit,
@@ -135,7 +139,12 @@ def cpt_train(
     logger.info(f"Peak reserved memory for training = {used_memory_for_lora} GB.")
     logger.info(f"Peak reserved memory % of max memory = {used_percentage} %.")
     logger.info(f"Peak reserved memory for training % of max memory = {lora_percentage} %.")
-    
+
+    save_directory = PROJECT_PATH + "/" + "models"
+    os.makedirs(save_directory, exist_ok=True)
+    logger.info(f'Saving model <{_model}> to: <{save_directory}>')
+    model.save_pretrained_gguf("directory", tokenizer, quantization_method = quantization_mode)
+
     if infer_at_once:
         text_streamer = TextIteratorStreamer(tokenizer)
         max_print_width = 100

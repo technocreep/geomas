@@ -9,3 +9,8 @@ def get_dataset(path: Path):
 
     dataset = load_dataset("json", data_files=[str(f) for f in data_files], split="train")
     return dataset
+
+
+if __name__ == "__main__":
+    ds = get_dataset(path="output_json")
+    _ = 1

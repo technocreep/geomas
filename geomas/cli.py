@@ -2,6 +2,9 @@ import typer
 from geomas.core.logger import get_logger
 import os
 from geomas.core.utils import ALLOWED_QUANTS
+from geomas.core.utils import PROJECT_PATH
+from geomas.core.pdf_to_json import process_folder
+
 
 app = typer.Typer(help="GEOMAS: CLI tool for LLM Training")
 logger = get_logger()
@@ -15,6 +18,7 @@ def train(
 	):
 	"""Run Training"""
 	# set up CUDA device
+	from geomas.core.continued_pretrain import cpt_train
 	os.environ["CUDA_VISIBLE_DEVICES"] = device
 	
 	dataset_name = dataset_path.split('/')[-1]
@@ -22,7 +26,6 @@ def train(
 	logger.info(f"Training model '{model}' on dataset '{dataset_name}'")
 	logger.info(f"CUDA device <{device}> is selected")
 
-	from geomas.core.continued_pretrain import cpt_train
 	
 	cpt_train(
 		model_name=model, 
@@ -30,6 +33,27 @@ def train(
 		quantization_mode=quantization_mode)
 	
 	logger.info('>>>>>> training finished <<<<<<<')
+
+
+@app.command()
+def makedataset(
+	source: str = typer.Argument(help="Path to folder with data files"),
+	destination: str = typer.Argument(help="Directory to save processed docs", default=PROJECT_PATH)
+	):
+
+	if not os.path.exists(source):
+		logger.error(f"Source path <{source}> doesn't exist")
+		raise ValueError
+	
+	os.makedirs(destination, exist_ok=True)
+
+	logger.info(f"Processing folder: <{source}>")
+	process_folder(
+		folder_path=source,
+		output_folder=destination
+	)
+	logger.info(f"Saved to: <{destination}>")
+
 
 
 @app.command()

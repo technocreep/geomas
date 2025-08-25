@@ -5,6 +5,10 @@ import json
 import subprocess
 from PyPDF2 import PdfReader
 from bs4 import BeautifulSoup
+from geomas.core.logger import get_logger
+
+
+logger = get_logger()
 
 
 def pdf_to_text(pdf_path):
@@ -103,7 +107,7 @@ def process_folder(folder_path, output_folder="output_json", max_chunk_size=1200
                 elif ext in (".html", ".htm"):
                     text = html_to_text(file_path)
                 else:
-                    print(f"Skipping {filename} (unsupported format)")
+                    logger.info(f"Skipping {filename} (unsupported format)")
                     continue
 
                 text = clean_text(text)
@@ -116,10 +120,10 @@ def process_folder(folder_path, output_folder="output_json", max_chunk_size=1200
                 json_path = os.path.join(out_dir, json_filename)
 
                 save_to_json(chunks, json_path)
-                print(f"✅ {file_path} → {json_path} ({len(chunks)} chunks)")
+                logger.info(f"✅ {file_path} → {json_path} ({len(chunks)} chunks)")
 
             except Exception as e:
-                print(f"❌ Processing error {file_path}: {e}")
+                logger.info(f"❌ Processing error {file_path}: {e}")
 
 
 if __name__ == "__main__":

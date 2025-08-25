@@ -13,6 +13,13 @@ geomas health
 
 ## Continued pretraining
 
+### Make dataset
+Recursively walks through source directory and produce destination directory with json versions of initial documents
+
+```bash
+geomas makedataset ./source ./destination
+```
+
 ```bash
 geomas train MODEL DATASET_PATH
 ```

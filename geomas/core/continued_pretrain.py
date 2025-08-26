@@ -1,20 +1,22 @@
+from datetime import datetime
 from pathlib import Path
 from unsloth import FastLanguageModel
-import torch
 from datasets import load_dataset
-from trl import SFTTrainer
-from transformers import TrainingArguments
 from unsloth import is_bfloat16_supported
 from unsloth import UnslothTrainer, UnslothTrainingArguments
 from transformers import TextIteratorStreamer
 from threading import Thread
 import textwrap
-import sys
 import os
+
+import mlflow
 
 from geomas.core.logger import get_logger
 from geomas.core.dataset import get_dataset
 from geomas.core.utils import PROJECT_PATH
+from geomas.core.report import pretrain_report, posttrain_report
+from geomas.core.config import prepare_settings
+
 
 logger = get_logger()
 
@@ -30,34 +32,24 @@ def cpt_train(
     logger.info(f'Model - {model_name}')
     logger.info(f'Dataset path: {dataset_path}')
 
+    # need this correction to log model with mlflow
+    correct_model_name = model_name.split('/')[-1].translate(str.maketrans('', '', '/:.%"\''))
+
+    trainer_config, peft_config = prepare_settings(f"cpt-{correct_model_name}")
+
+    mlflow.set_experiment(experiment_name=f"SPT-train-{correct_model_name}")
+    run_name = f"{correct_model_name}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%s')}"
     max_seq_length = 2048
-    dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
-    load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name = model_name, # "unsloth/mistral-7b" for 16bit loading
         max_seq_length = max_seq_length,
-        dtype = dtype,
-        load_in_4bit = load_in_4bit,
+        dtype = None, # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
+        load_in_4bit = True, # Use 4bit quantization to reduce memory usage. Can be False.
         # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
     )
     
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r = 128, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
-        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj",
-
-                        "embed_tokens", "lm_head",], # Add for continual pretraining
-        lora_alpha = 32,
-        lora_dropout = 0, # Supports any, but = 0 is optimized
-        bias = "none",    # Supports any, but = "none" is optimized
-        # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
-        use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
-        random_state = 3407,
-        use_rslora = True,  # We support rank stabilized LoRA
-        loftq_config = None, # And LoftQ
-    )
+    model = FastLanguageModel.get_peft_model(model, **peft_config)
 
     dataset = get_dataset(dataset_path)
 
@@ -79,56 +71,44 @@ def cpt_train(
         dataset_text_field = "text",
         max_seq_length = max_seq_length,
         dataset_num_proc = 8,
-
+        
         args = UnslothTrainingArguments(
-            per_device_train_batch_size = 2,
-            gradient_accumulation_steps = 8,
-
-            warmup_ratio = 0.1,
-            num_train_epochs = 1,
-
-            learning_rate = 5e-5,
-            embedding_learning_rate = 5e-6,
-
+            **trainer_config,
             fp16 = not is_bfloat16_supported(),
             bf16 = is_bfloat16_supported(),
-            logging_steps = 1,
-            optim = "adamw_8bit",
-            weight_decay = 0.00,
-            lr_scheduler_type = "cosine",
-            seed = 3407,
-            output_dir = "outputs",
-            report_to = "none", # TODO: Use this for WandB etc
+            output_dir = f"outputs/{correct_model_name}",
+            run_name = run_name,
+            report_to = "mlflow",
         ),
     )
 
-    logger.info("Pre-Training report >>> ")
-    gpu_stats = torch.cuda.get_device_properties(0)
-    start_gpu_memory = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
-    max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
-    logger.info(f"GPU = {gpu_stats.name}. Max memory = {max_memory} GB.")
-    logger.info(f"{start_gpu_memory} GB of memory reserved.")
-
+    # Train
+    start_gpu_memory, max_memory = pretrain_report()
     logger.info("TRAINING ...")
     trainer_stats = trainer.train()
+    train_report = posttrain_report(
+        start_gpu_memory=start_gpu_memory,
+        max_memory=max_memory,
+        trainer_stats=trainer_stats
+    )
 
-    logger.info("After-Training report >>>")
-    used_memory = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
-    used_memory_for_lora = round(used_memory - start_gpu_memory, 3)
-    used_percentage = round(used_memory         /max_memory*100, 3)
-    lora_percentage = round(used_memory_for_lora/max_memory*100, 3)
-    logger.info(f"{trainer_stats.metrics['train_runtime']} seconds used for training.")
-    logger.info(f"{round(trainer_stats.metrics['train_runtime']/60, 2)} minutes used for training.")
-    logger.info(f"Peak reserved memory = {used_memory} GB.")
-    logger.info(f"Peak reserved memory for training = {used_memory_for_lora} GB.")
-    logger.info(f"Peak reserved memory % of max memory = {used_percentage} %.")
-    logger.info(f"Peak reserved memory for training % of max memory = {lora_percentage} %.")
-
-    save_directory = PROJECT_PATH + "/" + "models"
+    # Save
+    save_directory = PROJECT_PATH + "/../" + "models" + "/" + correct_model_name
     os.makedirs(save_directory, exist_ok=True)
     logger.info(f'Saving model <{model_name}> to: <{save_directory}>')
-    model.save_pretrained_gguf("directory", tokenizer, quantization_method = quantization_mode)
+    model.save_pretrained(save_directory, quantization_method = quantization_mode)
+    tokenizer.save_pretrained(save_directory, quantization_method = quantization_mode)
 
+    # Report to MLFLOW
+    last_run_id = mlflow.last_active_run().info.run_id
+    with mlflow.start_run(run_id=last_run_id):
+        mlflow.log_params(train_report)
+        mlflow.transformers.log_model(
+            transformers_model={"model": trainer.model, "tokenizer": tokenizer},
+            name=correct_model_name,
+        )
+
+    # TODO: probably make correct infer of trained model and log into mlflow
     if infer_at_once:
         text_streamer = TextIteratorStreamer(tokenizer)
         max_print_width = 100
@@ -163,3 +143,13 @@ def cpt_train(
                 print(new_text, end = "")
             pass
         pass
+
+
+if __name__ == "__main__":
+    from geomas.core.utils import ALLOWED_MODELS
+
+    cpt_train(
+        model_name=ALLOWED_MODELS["gpt-oss"],
+        dataset_path="/app/test_dataset",
+
+    )

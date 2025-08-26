@@ -7,7 +7,9 @@ requires-python = ">=3.10"
 dependencies = [
     "typer",
     "PyPDF2",
-    "timm"
+    "timm",
+    "bs4",
+    "mlflow"
 ]
 
 [tool.setuptools]

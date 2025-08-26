@@ -11,7 +11,7 @@ logger = get_logger()
 
 @app.command()
 def train(
-	model: str = typer.Argument(help="Model to train"),
+	model: str = typer.Argument(help=f"Model to train. Available: {ALLOWED_MODELS.keys()}"),
 	dataset_path: str = typer.Argument(help="Path to dataset"),
 	device: int = typer.Argument(help="Index of GPU device to compute on"),
 	quantization_mode: str = typer.Argument(help=f"Allowed methods: {ALLOWED_QUANTS}", default="fast_quantized")
@@ -29,7 +29,7 @@ def train(
 	dataset_name = dataset_path.split('/')[-1]
 	
 	logger.info(f"Training model '{model_name}' on dataset '{dataset_name}'")
-	logger.info(f"CUDA device <{device}> is selected")
+	logger.info(f"CUDA device <{os.environ['CUDA_VISIBLE_DEVICES']}> is selected")
 
 	
 	cpt_train(

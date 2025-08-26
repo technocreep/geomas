@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 PROJECT_PATH = str(Path(__file__).parent.parent.parent)
+CONFIG_PATH = PROJECT_PATH + "/geomas/core/config/"
 
 
 ALLOWED_QUANTS = \
@@ -36,6 +37,6 @@ ALLOWED_QUANTS = \
 ALLOWED_MODELS = {
     "gpt-oss": "unsloth/gpt-oss-20b",
     "gemma-3n": "unsloth/gemma-3n-E4B-unsloth-bnb-4bit",
-    "mistral-7b": "mistral-7b-v0.3-bnb-4bit",
-    "gemma-7b": "gemma-7b-bnb-4bit",
+    "mistral-7b": "unsloth/mistral-7b-v0.3-bnb-4bit",
+    "gemma-7b": "unslosth/gemma-7b-bnb-4bit",
 }

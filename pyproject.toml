@@ -9,7 +9,9 @@ dependencies = [
     "PyPDF2",
     "timm",
     "bs4",
-    "mlflow"
+    "mlflow",
+    "psutil",
+    "pynvml",
 ]
 
 [tool.setuptools]

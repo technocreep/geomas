@@ -38,118 +38,121 @@ def cpt_train(
     trainer_config, peft_config = prepare_settings(f"cpt-{correct_model_name}")
 
     mlflow.set_experiment(experiment_name=f"SPT-train-{correct_model_name}")
+    mlflow.enable_system_metrics_logging()
     run_name = f"{correct_model_name}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%s')}"
-    max_seq_length = 2048
-
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name = model_name, # "unsloth/mistral-7b" for 16bit loading
-        max_seq_length = max_seq_length,
-        dtype = None, # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
-        load_in_4bit = True, # Use 4bit quantization to reduce memory usage. Can be False.
-        # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
-    )
     
-    model = FastLanguageModel.get_peft_model(model, **peft_config)
+    with mlflow.start_run(run_name=run_name):
+        max_seq_length = 2048
 
-    dataset = get_dataset(dataset_path)
-
-    EOS_TOKEN = tokenizer.eos_token
-    
-    def formatting_prompts_func(examples):
-        return { "text" : [example + EOS_TOKEN for example in examples["text"]] }
-    
-    dataset = dataset.map(formatting_prompts_func, batched = True,)
-
-    logger.debug("Dataset samples:")
-    for row in dataset[:2]["text"]:
-        logger.debug(row)
-
-    trainer = UnslothTrainer(
-        model = model,
-        tokenizer = tokenizer,
-        train_dataset = dataset,
-        dataset_text_field = "text",
-        max_seq_length = max_seq_length,
-        dataset_num_proc = 8,
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name = model_name, # "unsloth/mistral-7b" for 16bit loading
+            max_seq_length = max_seq_length,
+            dtype = None, # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
+            load_in_4bit = True, # Use 4bit quantization to reduce memory usage. Can be False.
+            # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
+        )
         
-        args = UnslothTrainingArguments(
-            **trainer_config,
-            fp16 = not is_bfloat16_supported(),
-            bf16 = is_bfloat16_supported(),
-            output_dir = f"outputs/{correct_model_name}",
-            run_name = run_name,
-            report_to = "mlflow",
-        ),
-    )
+        model = FastLanguageModel.get_peft_model(model, **peft_config)
 
-    # Train
-    start_gpu_memory, max_memory = pretrain_report()
-    logger.info("TRAINING ...")
-    trainer_stats = trainer.train()
-    train_report = posttrain_report(
-        start_gpu_memory=start_gpu_memory,
-        max_memory=max_memory,
-        trainer_stats=trainer_stats
-    )
+        dataset = get_dataset(dataset_path)
 
-    # Save
-    save_directory = PROJECT_PATH + "/../" + "models" + "/" + correct_model_name
-    os.makedirs(save_directory, exist_ok=True)
-    logger.info(f'Saving model <{model_name}> to: <{save_directory}>')
-    model.save_pretrained(save_directory, quantization_method = quantization_mode)
-    tokenizer.save_pretrained(save_directory, quantization_method = quantization_mode)
+        EOS_TOKEN = tokenizer.eos_token
+        
+        def formatting_prompts_func(examples):
+            return { "text" : [example + EOS_TOKEN for example in examples["text"]] }
+        
+        dataset = dataset.map(formatting_prompts_func, batched = True,)
 
-    # Report to MLFLOW
-    last_run_id = mlflow.last_active_run().info.run_id
-    with mlflow.start_run(run_id=last_run_id):
+        logger.debug("Dataset samples:")
+        for row in dataset[:2]["text"]:
+            logger.debug(row)
+
+        trainer = UnslothTrainer(
+            model = model,
+            tokenizer = tokenizer,
+            train_dataset = dataset,
+            dataset_text_field = "text",
+            max_seq_length = max_seq_length,
+            dataset_num_proc = 8,
+            
+            args = UnslothTrainingArguments(
+                **trainer_config,
+                fp16 = not is_bfloat16_supported(),
+                bf16 = is_bfloat16_supported(),
+                output_dir = f"outputs/{correct_model_name}",
+                run_name = run_name,
+                report_to = "mlflow",
+            ),
+        )
+
+        # Train
+        start_gpu_memory, max_memory = pretrain_report()
+        logger.info("TRAINING ...")
+        trainer_stats = trainer.train()
+        train_report = posttrain_report(
+            start_gpu_memory=start_gpu_memory,
+            max_memory=max_memory,
+            trainer_stats=trainer_stats
+        )
+
+        # Save
+        save_directory = PROJECT_PATH + "/../" + "models" + "/" + correct_model_name
+        os.makedirs(save_directory, exist_ok=True)
+        logger.info(f'Saving model <{model_name}> to: <{save_directory}>')
+        model.save_pretrained(save_directory, quantization_method = quantization_mode)
+        tokenizer.save_pretrained(save_directory, quantization_method = quantization_mode)
+
+        # Report to MLFLOW
+        last_run_id = mlflow.last_active_run().info.run_id
+        # with mlflow.start_run(run_id=last_run_id):
         mlflow.log_params(train_report)
         mlflow.transformers.log_model(
             transformers_model={"model": trainer.model, "tokenizer": tokenizer},
             name=correct_model_name,
         )
 
-    # TODO: probably make correct infer of trained model and log into mlflow
-    if infer_at_once:
-        text_streamer = TextIteratorStreamer(tokenizer)
-        max_print_width = 100
+        # TODO: probably make correct infer of trained model and log into mlflow
+        if infer_at_once:
+            text_streamer = TextIteratorStreamer(tokenizer)
+            max_print_width = 100
 
-        inputs = tokenizer(
-        [
-            "На рудном поле преобладают разломы северо-восточного и северо-западного направлений, \
-             в меньшей степени развиты"
-        ]*1, return_tensors = "pt").to("cuda")
+            inputs = tokenizer(
+            [
+                "На рудном поле преобладают разломы северо-восточного и северо-западного направлений, \
+                в меньшей степени развиты"
+            ]*1, return_tensors = "pt").to("cuda")
 
-        generation_kwargs = dict(
-            inputs,
-            streamer = text_streamer,
-            max_new_tokens = 256,
-            use_cache = True,
-        )
-        thread = Thread(target = model.generate, kwargs = generation_kwargs)
-        thread.start()
+            generation_kwargs = dict(
+                inputs,
+                streamer = text_streamer,
+                max_new_tokens = 256,
+                use_cache = True,
+            )
+            thread = Thread(target = model.generate, kwargs = generation_kwargs)
+            thread.start()
 
-        length = 0
-        for j, new_text in enumerate(text_streamer):
-            if j == 0:
-                wrapped_text = textwrap.wrap(new_text, width = max_print_width)
-                length = len(wrapped_text[-1])
-                wrapped_text = "\n".join(wrapped_text)
-                print(wrapped_text, end = "")
-            else:
-                length += len(new_text)
-                if length >= max_print_width:
-                    length = 0
-                    print()
-                print(new_text, end = "")
+            length = 0
+            for j, new_text in enumerate(text_streamer):
+                if j == 0:
+                    wrapped_text = textwrap.wrap(new_text, width = max_print_width)
+                    length = len(wrapped_text[-1])
+                    wrapped_text = "\n".join(wrapped_text)
+                    print(wrapped_text, end = "")
+                else:
+                    length += len(new_text)
+                    if length >= max_print_width:
+                        length = 0
+                        print()
+                    print(new_text, end = "")
+                pass
             pass
-        pass
 
 
 if __name__ == "__main__":
     from geomas.core.utils import ALLOWED_MODELS
 
     cpt_train(
-        model_name=ALLOWED_MODELS["gpt-oss"],
+        model_name=ALLOWED_MODELS["mistral-7b"],
         dataset_path="/app/test_dataset",
 
     )

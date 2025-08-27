@@ -10,6 +10,7 @@ import textwrap
 import os
 
 import mlflow
+from mlflow.tracking import MlflowClient
 
 from geomas.core.logger import get_logger
 from geomas.core.dataset import get_dataset
@@ -17,7 +18,10 @@ from geomas.core.utils import PROJECT_PATH
 from geomas.core.report import pretrain_report, posttrain_report
 from geomas.core.config import prepare_settings
 
+from dotenv import load_dotenv
 
+
+load_dotenv(dotenv_path="/app/geomas/.env")
 logger = get_logger()
 
 
@@ -31,16 +35,30 @@ def cpt_train(
     logger.info('CPT Started')
     logger.info(f'Model - {model_name}')
     logger.info(f'Dataset path: {dataset_path}')
-
     # need this correction to log model with mlflow
     correct_model_name = model_name.split('/')[-1].translate(str.maketrans('', '', '/:.%"\''))
 
-    trainer_config, peft_config = prepare_settings(f"cpt-{correct_model_name}")
+    # always go first
+    mlflow.set_tracking_uri("http://localhost:5000")
+    client = MlflowClient()
+    exp_name = f"CPT-{correct_model_name}"
+    exp = client.get_experiment_by_name(exp_name)
+    if exp is None:
+        logger.info(f"Experiment {exp_name} not found. Creating...")
+        exp_id = client.create_experiment(
+        exp_name,
+        artifact_location=f"s3://mlflow/experiments/{exp_name}"
+    )
+    else:
+        exp_id = exp.experiment_id
 
-    mlflow.set_experiment(experiment_name=f"SPT-train-{correct_model_name}")
+    mlflow.set_experiment(experiment_id=exp_id)
     mlflow.enable_system_metrics_logging()
-    run_name = f"{correct_model_name}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%s')}"
+
+    # get necessery configs
+    trainer_config, peft_config = prepare_settings(f"cpt-{correct_model_name}")
     
+    run_name = f"{correct_model_name}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%s')}"
     with mlflow.start_run(run_name=run_name):
         max_seq_length = 2048
 
@@ -103,8 +121,6 @@ def cpt_train(
         tokenizer.save_pretrained(save_directory, quantization_method = quantization_mode)
 
         # Report to MLFLOW
-        last_run_id = mlflow.last_active_run().info.run_id
-        # with mlflow.start_run(run_id=last_run_id):
         mlflow.log_params(train_report)
         mlflow.transformers.log_model(
             transformers_model={"model": trainer.model, "tokenizer": tokenizer},

@@ -13,13 +13,12 @@ logger = get_logger()
 def train(
 	model: str = typer.Argument(help=f"Model to train. Available: {ALLOWED_MODELS.keys()}"),
 	dataset_path: str = typer.Argument(help="Path to dataset"),
-	device: int = typer.Argument(help="Index of GPU device to compute on"),
+	# device: int = typer.Argument(help="Index of GPU device to compute on"),
 	quantization_mode: str = typer.Argument(help=f"Allowed methods: {ALLOWED_QUANTS}", default="fast_quantized")
 	):
 	"""Run Training"""
 	# set up CUDA device
 	from geomas.core.continued_pretrain import cpt_train
-	os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
 
 	model_name = ALLOWED_MODELS.get(model, None)
 	if not model:
@@ -29,8 +28,12 @@ def train(
 	dataset_name = dataset_path.split('/')[-1]
 	
 	logger.info(f"Training model '{model_name}' on dataset '{dataset_name}'")
-	logger.info(f"CUDA device <{os.environ['CUDA_VISIBLE_DEVICES']}> is selected")
-
+	
+	try:
+		logger.info(f"CUDA device <{os.environ['CUDA_VISIBLE_DEVICES']}> is selected")
+	except Exception:
+		logger.error("No CUDA_VISIBLE_DEVICES env variable is set. Do `export CUDA_VISIBLE_DEVICES=1`")
+		return
 	
 	cpt_train(
 		model_name=model_name, 
@@ -75,7 +78,13 @@ def health():
 		if torch.cuda.is_available():
 			logger.info(f"Available devices: {torch.cuda.device_count()}")
 			for device in range(torch.cuda.device_count()):
-				logger.info(f"Device #{device}: {torch.cuda.get_device_name(device)}")
+				logger.info(f"Device ###{device}: {torch.cuda.get_device_name(device)}")
+
+				device = torch.device(f'cuda:{device}')
+				free, total = torch.cuda.mem_get_info(device)
+				mem_used_MB = (total - free) / 1024 ** 2
+				logger.info(f'Memory in use, MB: {mem_used_MB}')
+
 	except Exception as e:
 		logger.info("Caught exception:")
 		logger.info(e)

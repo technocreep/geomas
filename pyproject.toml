@@ -12,6 +12,7 @@ dependencies = [
     "mlflow",
     "psutil",
     "pynvml",
+    "boto3",
 ]
 
 [tool.setuptools]

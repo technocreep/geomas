@@ -13,8 +13,8 @@ logger = get_logger()
 def train(
 	model: str = typer.Argument(help=f"Model to train. Available: {ALLOWED_MODELS.keys()}"),
 	dataset_path: str = typer.Argument(help="Path to dataset"),
-	# device: int = typer.Argument(help="Index of GPU device to compute on"),
-	quantization_mode: str = typer.Argument(help=f"Allowed methods: {ALLOWED_QUANTS}", default="fast_quantized")
+	tag: str = typer.Argument(help="Any prefix to experiment name", default=""),
+	quantization_mode: str = typer.Argument(help=f"Allowed methods: {ALLOWED_QUANTS}", default="fast_quantized"),
 	):
 	"""Run Training"""
 	# set up CUDA device
@@ -38,9 +38,10 @@ def train(
 	cpt_train(
 		model_name=model_name, 
 		dataset_path=dataset_path,
-		quantization_mode=quantization_mode)
+		quantization_mode=quantization_mode,
+		tag=tag)
 	
-	logger.info('>>>>>> training finished <<<<<<<')
+	logger.info('>>>>>> Training finished <<<<<<<')
 
 
 @app.command()

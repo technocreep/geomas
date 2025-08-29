@@ -35,8 +35,9 @@ ALLOWED_QUANTS = \
 }
 
 ALLOWED_MODELS = {
-    "gpt-oss": "unsloth/gpt-oss-20b",
-    "gemma-3n": "unsloth/gemma-3n-E4B-unsloth-bnb-4bit",
+    # "gpt-oss": "unsloth/gpt-oss-20b",
+    # "gemma-3n": "unsloth/gemma-3n-E4B-unsloth-bnb-4bit",
     "mistral-7b": "unsloth/mistral-7b-v0.3-bnb-4bit",
-    "gemma-7b": "unslosth/gemma-7b-bnb-4bit",
+    "qwen3-14b": "unsloth/Qwen3-14B-Base-unsloth-bnb-4bit"
+    # "gemma-7b": "unslosth/gemma-7b-bnb-4bit",
 }

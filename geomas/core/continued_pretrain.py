@@ -30,7 +30,8 @@ def cpt_train(
         model_name: str,
         dataset_path: Path,
         infer_at_once: bool = False,
-        quantization_mode: str = "fast_quantized"
+        quantization_mode: str = "fast_quantized",
+        tag: str = ""
 ):
     logger.info('CPT Started')
     logger.info(f'Model - {model_name}')
@@ -41,15 +42,17 @@ def cpt_train(
     # always go first
     mlflow.set_tracking_uri("http://localhost:5000")
     client = MlflowClient()
-    exp_name = f"CPT-{correct_model_name}"
+    prefix = f"{tag}-" if tag else ""
+    exp_name = f"{prefix}CPT-{correct_model_name}"
     exp = client.get_experiment_by_name(exp_name)
     if exp is None:
         logger.info(f"Experiment {exp_name} not found. Creating...")
         exp_id = client.create_experiment(
-        exp_name,
+        name=exp_name,
         artifact_location=f"s3://mlflow/experiments/{exp_name}"
     )
     else:
+        logger.info(f"Experiment {exp_name} exists")
         exp_id = exp.experiment_id
 
     mlflow.set_experiment(experiment_id=exp_id)
@@ -170,5 +173,5 @@ if __name__ == "__main__":
     cpt_train(
         model_name=ALLOWED_MODELS["mistral-7b"],
         dataset_path="/app/test_dataset",
-
+        tag='cock'
     )

@@ -12,5 +12,5 @@ def get_dataset(path: Path):
 
 
 if __name__ == "__main__":
-    ds = get_dataset(path="output_json")
+    ds = get_dataset(path="/app/cpt_full_dataset")
     _ = 1

@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -10,19 +11,21 @@ from threading import Thread
 import textwrap
 import os
 
+import mlflow
+from mlflow.tracking import MlflowClient
+
 from geomas.core.logger import get_logger
 from geomas.core.dataset import get_dataset
 from geomas.core.utils import PROJECT_PATH
+from geomas.core.report import pretrain_report, posttrain_report
+from geomas.core.config import prepare_settings
 
+from dotenv import load_dotenv
+
+
+load_dotenv(dotenv_path="/app/geomas/.env")
 logger = get_logger()
 
-
-MODEL_MAP = {
-    "gpt-oss": "unsloth/gpt-oss-20b",
-    "gemma-3n": "unsloth/gemma-3n-E4B-unsloth-bnb-4bit",
-    "mistral-7b": "mistral-7b-v0.3-bnb-4bit",
-    "gemma-7b": "gemma-7b-bnb-4bit",
-}
 
 
 class CPTTrainer:

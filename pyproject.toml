@@ -6,6 +6,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "typer",
+    "PyPDF2",
+    "timm",
+    "bs4",
+    "mlflow",
+    "psutil",
+    "pynvml",
+    "boto3",
 ]
 
 [tool.setuptools]
@@ -15,7 +22,6 @@ packages = ["geomas"]
 dev = [
     "ruff",
     "pytest",
-    "PyPDF2"
 ]
 
 [tool.ruff.lint]

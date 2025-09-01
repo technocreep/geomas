@@ -20,7 +20,28 @@ Recursively walks through source directory and produce destination directory wit
 geomas makedataset ./source ./destination
 ```
 
+Check that all services are UP:
+
 ```bash
+docker ps -a | grep mlflow
+```
+There must be 3 of them: 
+
+* `mlflow_postgres` – postgres database for metadata on port `5432`
+* `mlflow_minio` – local S3 for heavy artifacts on port `9000`
+* `mlflow-mlflow-1` – MLFlow server itself on port `5000`
+
+In `geomas` directory there must be `.env` file with content:
+
+```yaml
+MLFLOW_TRACKING_URI=http://127.0.0.1:5000
+MLFLOW_S3_ENDPOINT_URL=http://127.0.0.1:9000
+AWS_ACCESS_KEY_ID=***
+AWS_SECRET_ACCESS_KEY=***
+```
+
+```bash
+export CUDA_VISIBLE_DEVICES=1
 geomas train MODEL DATASET_PATH
 ```
 

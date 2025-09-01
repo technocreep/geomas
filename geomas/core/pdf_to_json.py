@@ -1,13 +1,12 @@
-import json
 import os
 import re
-import subprocess
 import unicodedata
-
-from bs4 import BeautifulSoup
+import json
+import subprocess
 from PyPDF2 import PdfReader
-
+from bs4 import BeautifulSoup
 from geomas.core.logger import get_logger
+
 
 logger = get_logger()
 
@@ -52,9 +51,7 @@ def chunk_text_by_sentences(text, max_chunk_size=1200):
             chunks.append(current_chunk.strip())
             current_chunk = sentence_with_dot
         else:
-            current_chunk += (
-                " " + sentence_with_dot if current_chunk else sentence_with_dot
-            )
+            current_chunk += " " + sentence_with_dot if current_chunk else sentence_with_dot
 
     if current_chunk:
         chunks.append(current_chunk.strip())
@@ -79,7 +76,7 @@ def clean_text(text: str) -> str:
     text = re.sub(r"\s+\)", ")", text)
 
     # 5. Bring quotes to the same type
-    text = text.replace("«", '"').replace("»", '"')
+    text = text.replace("«", "\"").replace("»", "\"")
 
     # 6. Unicode normalization
     text = unicodedata.normalize("NFC", text)

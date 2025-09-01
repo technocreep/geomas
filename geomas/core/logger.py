@@ -2,6 +2,7 @@ import logging
 import logging.handlers
 import os
 from datetime import datetime
+
 from geomas.core.utils import PROJECT_PATH
 
 _LOG_FILE_NAME = None

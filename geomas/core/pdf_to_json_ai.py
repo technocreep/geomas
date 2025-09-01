@@ -1,20 +1,27 @@
-import os, re, json, time, pathlib
-import pdfplumber
+import json
+import os
+import pathlib
+import re
+import time
+
 import google.generativeai as genai
-from tqdm import tqdm
+import pdfplumber
 from tenacity import retry, stop_after_attempt, wait_exponential
+from tqdm import tqdm
 
 API_KEY = os.environ.get("GEMINI_API_KEY")
-assert API_KEY and API_KEY.strip(), "Please, put your GEMINI_API_KEY into environment variable."
+assert API_KEY and API_KEY.strip(), (
+    "Please, put your GEMINI_API_KEY into environment variable."
+)
 genai.configure(api_key=API_KEY)
 
 MODEL_NAME = "gemini-1.5-flash"
 OUTPUT_DIR = ""  # если надо, меняйте
 pathlib.Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
-CHUNK_SIZE_CHARS = 1800    # обычно 1200–2200 символов — ок для RAG
-CHUNK_OVERLAP_CHARS = 10     # перекрытие между соседними чанками
-MAX_OUTPUT_TOKENS = 8192    # ограничение ответа модели (адаптируйте при необходимости)
+CHUNK_SIZE_CHARS = 1800  # обычно 1200–2200 символов — ок для RAG
+CHUNK_OVERLAP_CHARS = 10  # перекрытие между соседними чанками
+MAX_OUTPUT_TOKENS = 8192  # ограничение ответа модели (адаптируйте при необходимости)
 
 
 def read_pdf_raw_text(path: str) -> str:
@@ -69,10 +76,7 @@ def chunk_text(text: str, chunk_size: int, overlap: int):
         else:
             # фиксируем чанк
             chunk_str = " ".join(current_words)
-            chunks.append({
-                "id": f"chunk_{len(chunks):05d}",
-                "text": chunk_str
-            })
+            chunks.append({"id": f"chunk_{len(chunks):05d}", "text": chunk_str})
 
             # формируем overlap для следующего чанка
             if overlap > 0 and len(current_words) > overlap:
@@ -85,10 +89,7 @@ def chunk_text(text: str, chunk_size: int, overlap: int):
     # последний чанк
     if current_words:
         chunk_str = " ".join(current_words)
-        chunks.append({
-            "id": f"chunk_{len(chunks):05d}",
-            "text": chunk_str
-        })
+        chunks.append({"id": f"chunk_{len(chunks):05d}", "text": chunk_str})
 
     return chunks
 
@@ -135,9 +136,11 @@ def gemini_extract_everything(pdf_path: str, raw_text: str) -> str:
     parts = [
         file_ref,
         "\n---\nСырые извлечения из PDF (текстовые):\n",
-        raw_text[:400000],  # safety-ограничение: если очень длинно, обрежем контекст (на саму выжимку это не влияет)
+        raw_text[
+            :400000
+        ],  # safety-ограничение: если очень длинно, обрежем контекст (на саму выжимку это не влияет)
         "\n---\nИнструкция по представлению результата:\n",
-        prompt
+        prompt,
     ]
 
     # 3) Генерируем потоково
@@ -179,7 +182,7 @@ def save_chunks_jsonl(chunks, source_pdf: str) -> str:
                     "source": pathlib.Path(source_pdf).name,
                     "start": c["start"],
                     "end": c["end"],
-                }
+                },
             }
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     return out_jsonl
@@ -194,15 +197,21 @@ def save_chunks_json(chunks, source_pdf: str) -> str:
     return out_json
 
 
-def pdf_to_json_ai(pdf_path, chunk_size_chars=CHUNK_SIZE_CHARS, chunk_overlap_chars=CHUNK_OVERLAP_CHARS):
+def pdf_to_json_ai(
+    pdf_path, chunk_size_chars=CHUNK_SIZE_CHARS, chunk_overlap_chars=CHUNK_OVERLAP_CHARS
+):
     if not pathlib.Path(pdf_path).exists():
-        print("Укажите корректный путь к PDF в переменной PDF_PATH и перезапустите ячейку.")
+        print(
+            "Укажите корректный путь к PDF в переменной PDF_PATH и перезапустите ячейку."
+        )
     else:
         print("Читаю PDF локально…")
         raw = read_pdf_raw_text(pdf_path)
         raw = normalize_whitespace(raw)
 
-        print("Отправляю в Gemini на полную выжимку… (это может занять немного времени при длинном документе)")
+        print(
+            "Отправляю в Gemini на полную выжимку… (это может занять немного времени при длинном документе)"
+        )
         md = gemini_extract_everything(pdf_path, raw)
 
         # Небольшая косметика

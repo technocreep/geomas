@@ -1,6 +1,8 @@
 from unsloth import FastLanguageModel
 from transformers import TextStreamer
 import torch
+from transformers import TextStreamer
+from unsloth import FastLanguageModel
 
 
 # questions = [
@@ -48,7 +50,6 @@ print(model)
 _ = 1
 FastLanguageModel.for_inference(model)
 
- 
 if tokenizer.pad_token_id is None:
     tokenizer.pad_token = tokenizer.eos_token
 

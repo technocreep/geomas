@@ -14,6 +14,7 @@ def get_dataset(path: Path):
     return dataset
 
 
+
 if __name__ == "__main__":
     ds = get_dataset(path="/app/cpt_full_dataset")
     _ = 1

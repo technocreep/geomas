@@ -13,6 +13,9 @@ dependencies = [
     "psutil",
     "pynvml",
     "boto3",
+    "dotenv",
+    "google-generativeai",
+    "tenacity"
 ]
 
 [tool.setuptools]

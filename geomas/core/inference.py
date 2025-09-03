@@ -1,8 +1,6 @@
-from unsloth import FastLanguageModel
-from transformers import TextStreamer
-from unsloth import FastLanguageModel
-from transformers import TextStreamer
 import torch
+from transformers import TextStreamer
+from unsloth import FastLanguageModel
 
 CPT_MODEL_PATH = "/app/outputs/Qwen3-14B-Base-unsloth-bnb-4bit/checkpoint-451"
 BASE_MODEL_PATH = "unsloth/Qwen3-14B-Base-unsloth-bnb-4bit"
@@ -21,7 +19,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     load_in_4bit    = True,
 )
 
- 
+
 if tokenizer.pad_token_id is None:
     tokenizer.pad_token = tokenizer.eos_token
 

@@ -36,27 +36,28 @@ def cpt_train(
     logger.info('CPT Started')
     logger.info(f'Model - {model_name}')
     logger.info(f'Dataset path: {dataset_path}')
+    dataset_name = dataset_path.split('/')[-1]
     # need this correction to log model with mlflow
     correct_model_name = model_name.split('/')[-1].translate(str.maketrans('', '', '/:.%"\''))
 
     # always go first
-    mlflow.set_tracking_uri("http://localhost:5000")
-    client = MlflowClient()
-    prefix = f"{tag}-" if tag else ""
-    exp_name = f"{prefix}CPT-{correct_model_name}"
-    exp = client.get_experiment_by_name(exp_name)
-    if exp is None:
-        logger.info(f"Experiment {exp_name} not found. Creating...")
-        exp_id = client.create_experiment(
-        name=exp_name,
-        artifact_location=f"s3://mlflow/experiments/{exp_name}"
-    )
-    else:
-        logger.info(f"Experiment {exp_name} exists")
-        exp_id = exp.experiment_id
+    # mlflow.set_tracking_uri("http://localhost:5000")
+    # client = MlflowClient()
+    # prefix = f"{tag}-" if tag else ""
+    # exp_name = f"{prefix}CPT-{correct_model_name}"
+    # exp = client.get_experiment_by_name(exp_name)
+    # if exp is None:
+    #     logger.info(f"Experiment {exp_name} not found. Creating...")
+    #     exp_id = client.create_experiment(
+    #     name=exp_name,
+    #     artifact_location=f"s3://mlflow/experiments/{exp_name}"
+    # )
+    # else:
+    #     logger.info(f"Experiment {exp_name} exists")
+    #     exp_id = exp.experiment_id
 
-    mlflow.set_experiment(experiment_id=exp_id)
-    mlflow.enable_system_metrics_logging()
+    # mlflow.set_experiment(experiment_id=exp_id)
+    # mlflow.enable_system_metrics_logging()
 
     # get necessery configs
     trainer_config, peft_config = prepare_settings(f"cpt-{correct_model_name}")
@@ -72,8 +73,15 @@ def cpt_train(
             load_in_4bit = True, # Use 4bit quantization to reduce memory usage. Can be False.
             # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
         )
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info(f"Total params in model: {total_params:,}")
         
+
         model = FastLanguageModel.get_peft_model(model, **peft_config)
+        trainable_params = model.get_nb_trainable_parameters()[0]
+        trainable_percentage = 100 * trainable_params / total_params
+        logger.info(f"With rank {peft_config['r']} number of trainable params: {trainable_params:,}, {trainable_percentage:.2f}%")
+
 
         dataset = get_dataset(dataset_path)
 
@@ -100,7 +108,7 @@ def cpt_train(
                 **trainer_config,
                 fp16 = not is_bfloat16_supported(),
                 bf16 = is_bfloat16_supported(),
-                output_dir = f"outputs/{correct_model_name}",
+                output_dir = f"outputs/{correct_model_name}-{dataset_name}",
                 run_name = run_name,
                 report_to = "mlflow",
             ),
@@ -171,7 +179,7 @@ if __name__ == "__main__":
     from geomas.core.utils import ALLOWED_MODELS
 
     cpt_train(
-        model_name=ALLOWED_MODELS["mistral-7b"],
+        model_name=ALLOWED_MODELS["qwen3-14b"],
         dataset_path="/app/test_dataset",
         tag='cock'
     )

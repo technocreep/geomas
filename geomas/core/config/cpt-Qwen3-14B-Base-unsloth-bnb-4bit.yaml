@@ -3,23 +3,24 @@ UnslothTrainingArguments:
   gradient_accumulation_steps: 4
   warmup_ratio: 0.1
   num_train_epochs: 10
-  learning_rate: 0.0002 #2e-4
+  learning_rate: 0.00005 #5e-5
+  embedding_learning_rate: 0.000005 #5e-6
   logging_steps: 1
   optim: "adamw_8bit"
-  weight_decay: 0.01
-  lr_scheduler_type: "linear"
+  weight_decay: 0.0
+  lr_scheduler_type: "cosine"
   seed: 3407
   save_strategy: "epoch"
 
 
 PEFTParams:
-  r: 16
+  r: 64
   target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
-                   "gate_proj", "up_proj", "down_proj",]
-  lora_alpha: 16
-  lora_dropout: 0
+                   "gate_proj", "up_proj", "down_proj"]
+  lora_alpha: 32
+  lora_dropout: 0.05
   bias: "none"
   use_gradient_checkpointing: "unsloth"
   random_state: 3407
-  use_rslora: false
+  use_rslora: true
   loftq_config: null

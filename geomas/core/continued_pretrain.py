@@ -1,3 +1,11 @@
+from unsloth import (
+    FastLanguageModel,
+    UnslothTrainer,
+    UnslothTrainingArguments,
+    is_bfloat16_supported,
+    FastModel
+)
+
 import os
 from datetime import datetime
 from pathlib import Path
@@ -7,12 +15,6 @@ import mlflow
 from dotenv import load_dotenv
 from mlflow.tracking import MlflowClient
 
-from unsloth import (
-    FastLanguageModel,
-    UnslothTrainer,
-    UnslothTrainingArguments,
-    is_bfloat16_supported,
-)
 
 from geomas.core.config import prepare_settings
 from geomas.core.dataset import get_dataset
@@ -59,23 +61,31 @@ def cpt_train(
     mlflow.enable_system_metrics_logging()
 
     # get necessery configs
-    trainer_config, peft_config = prepare_settings(f"cpt-{correct_model_name}")
+    trainer_config, peft_config, model_config = prepare_settings(f"cpt-{correct_model_name}")
 
     run_name = f"{correct_model_name}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%s')}"
     with mlflow.start_run(run_name=run_name):
         max_seq_length = 2048
 
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=model_name,  # "unsloth/mistral-7b" for 16bit loading
-            max_seq_length=max_seq_length,
-            dtype=None,  # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
-            load_in_4bit=True,  # Use 4bit quantization to reduce memory usage. Can be False.
-            # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
-        )
-        total_params = sum(p.numel() for p in model.parameters())
-        logger.info(f"Total params in model: {total_params:,}")
-
-        model = FastLanguageModel.get_peft_model(model, **peft_config)
+        # need this becasuse gemma is multimodal
+        if "gemma" in model_name:
+            logger.info("Gemma model initialized with `FastModel` instead of `FastLanguageModel`")
+            model, tokenizer = FastModel.from_pretrained(
+                model_name=model_name,
+                **model_config
+            )
+            total_params = sum(p.numel() for p in model.parameters())
+            logger.info(f"Total params in model: {total_params:,}")
+            model = FastModel.get_peft_model(model, **peft_config)
+        else:
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=model_name,
+                **model_config
+            )
+            total_params = sum(p.numel() for p in model.parameters())
+            logger.info(f"Total params in model: {total_params:,}")
+            model = FastLanguageModel.get_peft_model(model, **peft_config)
+            
         trainable_params = model.get_nb_trainable_parameters()[0]
         trainable_percentage = 100 * trainable_params / total_params
         logger.info(
@@ -133,10 +143,12 @@ def cpt_train(
         tokenizer.save_pretrained(save_directory, quantization_method=quantization_mode)
 
         # Report to MLFLOW
-        mlflow.log_params(train_report)
+        for d in (train_report, trainer_config, peft_config, model_config):
+            mlflow.log_params(d)
         mlflow.transformers.log_model(
             transformers_model={"model": trainer.model, "tokenizer": tokenizer},
             name=correct_model_name,
+            # task="text_generation",
         )
 
 
@@ -144,7 +156,7 @@ if __name__ == "__main__":
     from geomas.core.utils import ALLOWED_MODELS
 
     cpt_train(
-        model_name=ALLOWED_MODELS["qwen3-14b"],
+        model_name=ALLOWED_MODELS["qwen3-30b"],
         dataset_path="/app/test_dataset",
-        tag="cock",
+        tag="test",
     )

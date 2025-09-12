@@ -35,7 +35,18 @@ ALLOWED_QUANTS = {
 ALLOWED_MODELS = {
     # "gpt-oss": "unsloth/gpt-oss-20b",
     # "gemma-3n": "unsloth/gemma-3n-E4B-unsloth-bnb-4bit",
-    "mistral-7b": "unsloth/mistral-7b-v0.3-bnb-4bit",
+    "mistral-7b-4bit": "unsloth/mistral-7b-v0.3-bnb-4bit",
+    "mistral-7b": "unsloth/mistral-7b-v0.3",
+
+    "minitron-8b": "nvidia/Mistral-NeMo-Minitron-8B-Base",
+
+    "mistral-nemo-12b": "unsloth/Mistral-Nemo-Base-2407",
     "qwen3-14b": "unsloth/Qwen3-14B-Base-unsloth-bnb-4bit",
+    "gemma-3-1b-4bit": "unsloth/gemma-3-1b-pt-unsloth-bnb-4bit",
+    "gemma-3-1b": "unsloth/gemma-3-1b-pt",
+    "gemma-3-27b": "unsloth/gemma-3-27b-pt",
+    "qwen3-30b-4bit": "unsloth/Qwen3-30B-A3B-Base-bnb-4bit",
+
+    # "qwen3-30b": "unsloth/Qwen3-30B-A3B-Base"
     # "gemma-7b": "unslosth/gemma-7b-bnb-4bit",
 }

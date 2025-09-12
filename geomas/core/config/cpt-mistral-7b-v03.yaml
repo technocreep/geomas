@@ -1,7 +1,7 @@
 ModelConfig:
   max_seq_length: 2048
   dtype: null
-  load_in_4bit: true
+  load_in_4bit: false
 
 
 UnslothTrainingArguments:

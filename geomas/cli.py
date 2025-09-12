@@ -17,9 +17,9 @@ def train(
     ),
     dataset_path: str = typer.Argument(help="Path to dataset"),
     tag: str = typer.Argument(help="Any prefix to experiment name", default=""),
-    quantization_mode: str = typer.Argument(
-        help=f"Allowed methods: {ALLOWED_QUANTS}", default="fast_quantized"
-    ),
+    # quantization_mode: str = typer.Argument(
+    #     help=f"Allowed methods: {ALLOWED_QUANTS}", default="fast_quantized"
+    # ),
 ):
     """Run Training"""
     # set up CUDA device
@@ -45,7 +45,7 @@ def train(
     cpt_train(
         model_name=model_name,
         dataset_path=dataset_path,
-        quantization_mode=quantization_mode,
+        # quantization_mode=quantization_mode,
         tag=tag,
     )
 

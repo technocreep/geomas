@@ -6,11 +6,11 @@ ModelConfig:
 
 UnslothTrainingArguments:
   per_device_train_batch_size: 40
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 2
   warmup_ratio: 0.1
   num_train_epochs: 10
-  learning_rate: 0.00005 #5e-5
-  embedding_learning_rate: 0.000005 #5e-6
+  learning_rate: 0.00003 #5e-5
+  embedding_learning_rate: 0.000003 #5e-6
   logging_steps: 1
   optim: "adamw_8bit"
   weight_decay: 0.0
@@ -21,9 +21,13 @@ UnslothTrainingArguments:
 
 PEFTParams:
   r: 128
-  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
-                   "gate_proj", "up_proj", "down_proj",
-                   "embed_tokens", "lm_head"]
+  # target_modules: ["q_proj", "k_proj", "v_proj", "o_proj",
+  #                  "gate_proj", "up_proj", "down_proj",
+  #                  "embed_tokens", "lm_head"]
+  finetune_vision_layers: false
+  finetune_language_layers: true
+  finetune_attention_modules: true
+  finetune_mlp_modules: true
   lora_alpha: 32
   lora_dropout: 0
   bias: "none"

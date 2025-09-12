@@ -13,7 +13,7 @@ from geomas.core.utils import PROJECT_PATH
 
 logger = get_logger("AI_PDF")
 
-load_dotenv(dotenv_path=PROJECT_PATH + "/geomas/.env")
+load_dotenv(dotenv_path="/app/geomas/.env")
 API_KEY = os.getenv("LITELLM_API_KEY")
 MODEL_NAME = os.getenv("GEMINI_MODEL")
 

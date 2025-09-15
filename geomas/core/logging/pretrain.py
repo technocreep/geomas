@@ -1,6 +1,6 @@
 import torch
 
-from geomas.core.logger import get_logger
+from geomas.core.logging.logger import get_logger
 
 logger = get_logger()
 

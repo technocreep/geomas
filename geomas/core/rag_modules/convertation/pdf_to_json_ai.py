@@ -8,7 +8,7 @@ import pdfplumber
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from geomas.core.logger import get_logger
+from geomas.core.logging.logger import get_logger
 from geomas.core.utils import PROJECT_PATH
 
 logger = get_logger("AI_PDF")

@@ -2,9 +2,9 @@ import os
 
 import typer
 
-from geomas.core.logger import get_logger
-from geomas.core.pdf_to_json import process_folder
-from geomas.core.utils import ALLOWED_MODELS, ALLOWED_QUANTS, PROJECT_PATH
+from geomas.core.logging.logger import get_logger
+from geomas.core.rag_modules.convertation.pdf_to_json import process_folder
+from geomas.core.utils import ALLOWED_MODELS, PROJECT_PATH
 
 app = typer.Typer(help="GEOMAS: CLI tool for LLM Training")
 logger = get_logger()
@@ -23,7 +23,7 @@ def train(
 ):
     """Run Training"""
     # set up CUDA device
-    from geomas.core.continued_pretrain import cpt_train
+    from geomas.core.learning.continued_pretrain import cpt_train
 
     model_name = ALLOWED_MODELS.get(model, None)
     if not model:

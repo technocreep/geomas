@@ -25,16 +25,27 @@ class RagApi:
     def _init_ranker_model(self):
         self.reranker = LLMReranker(self.llm, PROMPT_RANK)
 
-    def _retrieve(self):
+    def _retrieve(self, user_prompt, retrievers, collection_names, retriever_pipelines):
         logger.info('Retrieving ----------- IN PROGRESS')
-        context = RetrievingPipeline() \
-            .set_retrievers(retrievers) \
-            .set_collection_names(collection_names) \
-            .get_retrieved_docs(user_prompt)
+        if self.multirag:
+            logger.info('Retrieving ----------- IN PROGRESS')
+            contexts = [pipeline.get_retrieved_docs(user_prompt) for pipeline in retriever_pipelines]
+            logger.info('Retrieving ----------- DONE')
+
+            max_len_context = max([len(context) for context in contexts])
+            for context in contexts:
+                if len(context) < max_len_context:
+                    context.extend([Document(page_content='')] * (max_len_context - len(context)))
+        else:
+
+            context = RetrievingPipeline() \
+                .set_retrievers(retrievers) \
+                .set_collection_names(collection_names) \
+                .get_retrieved_docs(user_prompt)
         logger.info('Retrieving ----------- DONE')
         return context
 
-    def _rerank(self,context, user_prompt, rerank: bool = True):
+    def _rerank(self, context, user_prompt, rerank: bool = True):
         # Step 2. Ranking
         response = context
         if rerank:
@@ -74,39 +85,12 @@ class RagApi:
             self.multirag = True
 
         # Step 1. Retrieve
-        context = self._retrieve()
+        context = self._retrieve(user_prompt, retrievers, collection_names, retriever_pipelines)
 
         # Step 2. Ranking
         response = self._rerank(context, user_prompt, rerank)
 
         # Step 3. Get output
-        response = self._merge_output(response,user_prompt)
+        response = self._merge_output(response, user_prompt)
 
         return response
-
-    def run_multiple_rag(self,
-                         user_prompt: str,
-                         llm: LLM,
-                         retriever_pipelines: list[RetrievingPipeline]) -> str:
-        """
-        :param user_prompt: only prompt that was received from user
-        :param retriever_pipelines: ready to use retriever pipelines (retrievers and collection_names should be specified)
-        :param do_reranking: if reranking is necessary
-        :return: response from LLM
-        """
-        reranker = LLMReranker(llm, PROMPT_RANK)
-
-        # Retrieve
-        logger.info('Retrieving ----------- IN PROGRESS')
-        contexts = [pipeline.get_retrieved_docs(user_prompt) for pipeline in retriever_pipelines]
-        logger.info('Retrieving ----------- DONE')
-
-        max_len_context = max([len(context) for context in contexts])
-        for ctx in contexts:
-            if len(ctx) < max_len_context:
-                ctx.extend([Document(page_content='')] * (max_len_context - len(ctx)))
-
-
-
-
-        return llm_response

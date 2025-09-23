@@ -65,90 +65,90 @@ BASE_MODEL_PATH = "unsloth/Qwen3-14B-Base-unsloth-bnb-4bit"
 
 # CPT_MODEL_PATH = "/app/outputs/mistral-7b-v03-bnb-4bit/checkpoint-1808"
 # BASE_MODEL_PATH = "unsloth/mistral-7b-v0.3-bnb-4bit"
+def eval():
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        # model_name      = CPT_MODEL_PATH,
+        model_name      = BASE_MODEL_PATH,
+        max_seq_length  = 2048,
+        dtype           = None,
+        load_in_4bit    = True,
+    )
 
-model, tokenizer = FastLanguageModel.from_pretrained(
-    # model_name      = CPT_MODEL_PATH,
-    model_name      = BASE_MODEL_PATH,
-    max_seq_length  = 2048,
-    dtype           = None,
-    load_in_4bit    = True,
-)
+    FastLanguageModel.for_inference(model)
 
-FastLanguageModel.for_inference(model)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-if tokenizer.pad_token_id is None:
-    tokenizer.pad_token = tokenizer.eos_token
+    for i, prompt in enumerate(questions):
+        inputs = tokenizer([prompt], return_tensors="pt").to("cuda")
 
-for i, prompt in enumerate(questions):
-    inputs = tokenizer([prompt], return_tensors="pt").to("cuda")
+        print("=========")
+        print(f"Question:")
+        print(f"{prompt}")
+        print(f'Ground Truth:')
+        print(f'{answers[i]}')
 
-    print("=========")
-    print(f"Question:")
-    print(f"{prompt}")
-    print(f'Ground Truth:')
-    print(f'{answers[i]}')
+        for lim in token_limits:
 
-    for lim in token_limits:
+            # gemma1b_kwargs = dict(
+            #     max_new_tokens = lim,
+            #     do_sample      = True,
+            #     temperature    = 0.3,
+            #     top_p          = 0.95,
+            #     top_k          = 64,
+            #     min_p          = 0.01,
+            #     num_beams      = 1,
+            #     eos_token_id   = tokenizer.eos_token_id,
+            # )
+            qwen_kwargs = dict(
+                max_new_tokens = lim,
+                do_sample      = True,
+                temperature    = 0.3,
+                top_p          = 0.95,
+                top_k          = 50,
+                min_p          = 0.0,
+                num_beams      = 1,
+                eos_token_id   = tokenizer.eos_token_id,
+            )
+            # mistral_kwargs = dict(
+            #     max_new_tokens = lim,
+            #     do_sample      = True,
+            #     temperature    = 0.7,
+            #     top_p          = 0.95,
+            #     top_k          = 50,
+            #     min_p          = 0.0,
+            #     num_beams      = 1,
+            #     eos_token_id   = tokenizer.eos_token_id,
+            # )
 
-        # gemma1b_kwargs = dict(
-        #     max_new_tokens = lim,
-        #     do_sample      = True,
-        #     temperature    = 0.3,
-        #     top_p          = 0.95,
-        #     top_k          = 64,
-        #     min_p          = 0.01,
-        #     num_beams      = 1,
-        #     eos_token_id   = tokenizer.eos_token_id,
-        # )
-        qwen_kwargs = dict(
-            max_new_tokens = lim,
-            do_sample      = True,
-            temperature    = 0.3,
-            top_p          = 0.95,
-            top_k          = 50,
-            min_p          = 0.0,
-            num_beams      = 1,
-            eos_token_id   = tokenizer.eos_token_id,
-        )
-        # mistral_kwargs = dict(
-        #     max_new_tokens = lim,
-        #     do_sample      = True,
-        #     temperature    = 0.7,
-        #     top_p          = 0.95,
-        #     top_k          = 50,
-        #     min_p          = 0.0,
-        #     num_beams      = 1,
-        #     eos_token_id   = tokenizer.eos_token_id,
-        # )
+            text_streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+            f1 = []
+            for retry in range(3):
+                print(f"Response [{retry}] - max tokens: {lim}:")
+                with torch.inference_mode():
+                    output = model.generate(
+                        **inputs,
+                        streamer=text_streamer,
+                        **qwen_kwargs
+                        # **mistral_kwargs
+                        )
 
-        text_streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-        f1 = []
-        for retry in range(3):
-            print(f"Response [{retry}] - max tokens: {lim}:")
-            with torch.inference_mode():
-                output = model.generate(
-                    **inputs, 
-                    streamer=text_streamer, 
-                    **qwen_kwargs
-                    # **mistral_kwargs
+                response = tokenizer.decode(output[0], skip_special_tokens=True).split(prompt)[-1]
+
+                # from rouge_score import rouge_scorer
+                from bert_score import score as bert_score
+
+
+                P, R, F1 = bert_score(
+                    [response],
+                    [answers[i]],
+                    # lang='ru'
+                    model_type="xlm-roberta-large"
                     )
-                
-            response = tokenizer.decode(output[0], skip_special_tokens=True).split(prompt)[-1]
-            
-            # from rouge_score import rouge_scorer
-            from bert_score import score as bert_score
 
-            
-            P, R, F1 = bert_score(
-                [response], 
-                [answers[i]], 
-                # lang='ru'
-                model_type="xlm-roberta-large"
-                )
-            
-            f1.append(F1)
-            print(f"F1 score - {F1}")
-            print(f"Precision score - {P}")
-            print(f"Recall score - {R}")
-            print("=========")
-        print(f"Average F1: {sum(f1) / 3}")
+                f1.append(F1)
+                print(f"F1 score - {F1}")
+                print(f"Precision score - {P}")
+                print(f"Recall score - {R}")
+                print("=========")
+            print(f"Average F1: {sum(f1) / 3}")

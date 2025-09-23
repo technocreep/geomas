@@ -17,7 +17,7 @@ class DocsSearcherModels:
     chroma_client: ClientAPI = None
 
 
-class DocRetriever:
+class Retriever:
     def __init__(self, top_k: int, docs_searcher_models: DocsSearcherModels,
                  preprocess_query: Optional[Callable[[str], str]] = None):
         """

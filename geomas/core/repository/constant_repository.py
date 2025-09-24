@@ -1,0 +1,14 @@
+import os
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(ROOT_DIR, 'config.env')
+USE_S3 = False
+CHROMA_DB_PATH = './CHROMA_STORAGE_PATH'
+VISION_LLM_URL = './VISION_LLM_URL'
+SUMMARY_LLM_URL = './SUMMARY_LLM_URL'
+LLM_SERVICE_URL = './LLM_SERVICE_URL'
+IMAGE_RESOLUTION_SCALE = 2.0
+LLM_OCR_URL = './LLM_OCR_URL'
+BOS, EOS = "<|begin_of_text|>", "<|end_of_text|>"
+SOH, EOH = "<|start_header_id|>", "<|end_header_id|>\n\n"
+EOT = "<|eot_id|>"

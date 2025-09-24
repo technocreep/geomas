@@ -1,10 +1,13 @@
 import logging
+from copy import deepcopy
 
 from langchain_core.documents import Document
 from langchain_core.language_models import LLM
 
+from geomas.core.rag_modules.database.dataloader import load_documents_to_chroma_db
 from geomas.core.rag_modules.steps.ranker import LLMReranker
 from geomas.core.rag_modules.steps.retriever import Retriever, DocsSearcherModels, RetrievingPipeline
+from geomas.core.repository.database_repository import chroma_default_settings
 from geomas.core.repository.promts_repository import PROMPT_LLM_RESPONSE, PROMPT_RANK
 
 logger = logging.getLogger(__name__)
@@ -17,6 +20,19 @@ class RagApi:
     def __init__(self, llm: LLM):
         self.llm = llm
         self.multirag = False
+
+    def _load_chroma_db(self, path: str, collection: str) -> None:
+        # Loads data to ChromaDB
+        chroma_default_settings.collection_name = collection
+        chroma_default_settings.docs_collection_path = path
+        processing_batch_size = 32
+        loading_batch_size = 32
+        settings = deepcopy(chroma_default_settings)
+        load_documents_to_chroma_db(
+            settings=settings,
+            processing_batch_size=processing_batch_size,
+            loading_batch_size=loading_batch_size,
+        )
 
     def _init_retriever(self, docs_searcher_models: DocsSearcherModels, top_k: int = 5) -> Retriever:
         """Documents retriever object."""
@@ -31,11 +47,9 @@ class RagApi:
             logger.info('Retrieving ----------- IN PROGRESS')
             contexts = [pipeline.get_retrieved_docs(user_prompt) for pipeline in retriever_pipelines]
             logger.info('Retrieving ----------- DONE')
-
             max_len_context = max([len(context) for context in contexts])
-            for context in contexts:
-                if len(context) < max_len_context:
-                    context.extend([Document(page_content='')] * (max_len_context - len(context)))
+            [context.extend([Document(page_content='')] * (max_len_context - len(context)))
+             for context in contexts if len(context) < max_len_context]
         else:
 
             context = RetrievingPipeline() \

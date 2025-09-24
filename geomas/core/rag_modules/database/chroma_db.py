@@ -1,8 +1,5 @@
-import os
-from functools import partial
 
-from dotenv import load_dotenv
-from pydantic_settings import BaseSettings
+from functools import partial
 import base64
 import logging
 import os
@@ -10,24 +7,19 @@ import uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
-
-from dotenv import load_dotenv
 from langchain_core.documents.base import Document
 from langchain_core.messages import HumanMessage
-# from protollm.connectors import create_llm_connector
-from pydantic import BaseModel, Field
 import requests
-from geomas.core.repository.constant_repository import USE_S3, VISION_LLM_URL
+from geomas.core.repository.constant_repository import USE_S3, VISION_LLM_URL, SUMMARY_LLM_URL
 from geomas.core.rag_modules.parser.rag_parser import DocumentParser
-# from ChemCoScientist.paper_analysis.prompts import summarisation_prompt
-# from ChemCoScientist.paper_analysis.settings import allowed_providers
-# from ChemCoScientist.paper_analysis.settings import settings as default_settings
-# from CoScientist.paper_parser.s3_connection import s3_service
+
 
 from geomas.core.repository.constant_repository import (CONFIG_PATH, ROOT_DIR)
-from geomas.core.rag_modules.database.database_utils import ExpandedSummary, CustomEmbeddingFunction
-from geomas.core.repository.database_repository import DATABASE_PORT, DATABASE_HOST, RESET_DATABASE
-
+from geomas.core.rag_modules.database.database_utils import ExpandedSummary, CustomEmbeddingFunction, \
+    ChromaDatabaseClient
+from geomas.core.repository.database_repository import DATABASE_PORT, DATABASE_HOST, RESET_DATABASE, \
+    chroma_default_settings
+from geomas.core.repository.parsing_repository import DatabaseChunkingConfig
 
 IMAGES_PATH = os.path.join(ROOT_DIR, os.environ["PARSE_RESULTS_PATH"])
 PAPERS_PATH = os.path.join(ROOT_DIR, os.environ["PAPERS_STORAGE_PATH"])
@@ -86,28 +78,28 @@ class ChromaDatabaseStore:
             None
         """
         self.llm_url = VISION_LLM_URL
+        self.client = ChromaDatabaseClient()
 
-        self.client = ChromaClient()
+        self.workers = 1
 
+    def _init_llm_model(self):
+        self.llm_url = VISION_LLM_URL
+        self.model = load_llm_model(
+            self.llm_url, temperature=0.015, top_p=0.95, extra_body={"provider": {"only": allowed_providers}}
+        )
+    def _init_chunking_params(self):
+        self.sum_chunk_num = DatabaseChunkingConfig.sum_chunk_num
+        self.final_sum_chunk_num = DatabaseChunkingConfig.final_sum_chunk_num
+        self.txt_chunk_num = DatabaseChunkingConfig.txt_chunk_num
+        self.img_chunk_num = DatabaseChunkingConfig.img_chunk_num
+
+    def _init_collections(self):
         self.sum_collection_name = os.getenv("SUMMARIES_COLLECTION_NAME")
         self.txt_collection_name = os.getenv("TEXTS_COLLECTION_NAME")
         self.img_collection_name = os.getenv("IMAGES_COLLECTION_NAME")
-
-        self.sum_chunk_num = 15
-        self.final_sum_chunk_num = 3
-        self.txt_chunk_num = 15
-        self.img_chunk_num = 2
-
-        self.sum_collection = self.client.get_or_create_chroma_collection(
-            self.sum_collection_name, CustomEmbeddingFunction()
-        )
-        self.txt_collection = self.client.get_or_create_chroma_collection(
-            self.txt_collection_name, CustomEmbeddingFunction()
-        )
-        self.img_collection = self.client.get_or_create_chroma_collection(
-            self.img_collection_name, CustomEmbeddingFunction()
-        )
-        self.workers = 1
+        self.sum_collection = self.client.collection('get',self.sum_collection_name, CustomEmbeddingFunction)
+        self.txt_collection = self.client.collection('get', self.txt_collection_name, CustomEmbeddingFunction)
+        self.img_collection = self.client.collection('get', self.img_collection_name, CustomEmbeddingFunction)
 
     @staticmethod
     def _image_to_base64(image_path: str) -> str:
@@ -142,23 +134,14 @@ class ChromaDatabaseStore:
             "Be as concise as possible. "
             "Only use data from image, do NOT make anything up."
         )
-        model = create_llm_connector(
-            self.llm_url, temperature=0.015, top_p=0.95, extra_body={"provider": {"only": allowed_providers}}
-        )
+
         messages = [
             HumanMessage(
-                content=[
-                    {"type": "text", "text": sys_prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{self._image_to_base64(image_path)}"
-                        },
-                    },
-                ],
-            )
-        ]
-        res = model.invoke(messages)
+                content=[{"type": "text", "text": sys_prompt},
+                         { "type": "image_url",
+                           "image_url": {
+                            "url": f"data:image/jpeg;base64,{self._image_to_base64(image_path)}"},},],)]
+        res = self.vision_llm_model.invoke(messages)
         return res.content
 
     def store_text_chunks_in_chromadb(self, content: list, window_size: int = 15) -> None:
@@ -171,7 +154,10 @@ class ChromaDatabaseStore:
         Returns:
             None
 
-        The method transforms the input text chunks into numerical embeddings and stores them, along with the original text and associated metadata, into a ChromaDB collection. This allows for semantic search and retrieval of relevant information based on the content of the scientific papers. Unique IDs are assigned to each chunk to ensure proper indexing within the database.
+        The method transforms the input text chunks into numerical embeddings and stores them, along with the original
+        text and associated metadata, into a ChromaDB collection. This allows for semantic search and retrieval
+        of relevant information based on the content of the scientific papers.
+        Unique IDs are assigned to each chunk to ensure proper indexing within the database.
         """
         chunks_num = len(content)
         if chunks_num > window_size:
@@ -239,104 +225,6 @@ class ChromaDatabaseStore:
             ]
         )
 
-    def search_for_papers(self,
-                          query: str,
-                          chunks_num: int = None,
-                          final_chunks_num: int = None,
-                          meta_filter: dict = None) -> dict:
-        """
-        Retrieves relevant papers from the database based on a user's query.
-
-        This method performs an initial search to identify potentially relevant papers
-        and then refines the results using a reranker to improve accuracy and relevance.
-        The final results are returned as a list of paper sources.
-
-        Args:
-            self: The instance of the ChromaDBPaperStore class.
-            query (str): The search query string.
-            chunks_num (int, optional): The number of chunks to retrieve initially.
-                                         Defaults to self.sum_chunk_num if None.
-            final_chunks_num (int, optional): The number of final chunks to return.
-                                               Defaults to self.final_sum_chunk_num if None.
-
-        Returns:
-            dict: A dictionary containing a list of paper sources under the key 'answer'.
-        """
-        chunks_num = chunks_num if chunks_num else self.sum_chunk_num
-        final_chunks_num = final_chunks_num if final_chunks_num else self.final_sum_chunk_num
-
-        raw_docs = self.client.query_chromadb(
-            self.sum_collection, query, chunk_num=chunks_num, metadata_filter=meta_filter
-        )
-        docs = self.search_with_reranker(query, raw_docs, top_k=final_chunks_num)
-        res = [doc[2]["source"] for doc in docs]
-        return {'answer': res}
-
-    def retrieve_context(
-            self, query: str, relevant_papers: dict = None
-    ) -> tuple[list, dict, dict]:
-        """
-        Retrieves relevant information from text and images associated with scientific papers based on a user query.
-
-        This method aims to identify and extract the most pertinent data from a collection of scientific documents,
-        facilitating quick access to key insights related to a specific research question. It first identifies relevant papers and then utilizes vector similarity search
-        to find corresponding text and image chunks.
-
-        Args:
-            query (str): The search query used to identify relevant information.
-            relevant_papers (list, optional): A list of pre-identified relevant papers. Defaults to None, in which case a search for relevant papers is initiated.
-
-        Returns:
-            tuple[list, dict]: A tuple containing the retrieved text and image context.
-                - text_context (list): A list of text chunks deemed most relevant to the query.
-                - image_context (dict): A dictionary containing image data associated with the query.
-        """
-        if not relevant_papers:
-            relevant_papers = self.search_for_papers(query)
-
-        raw_text_context = self.client.query_chromadb(
-            self.txt_collection,
-            query,
-            {"source": {"$in": relevant_papers['answer']}},
-            self.txt_chunk_num,
-        )
-        image_context = self.client.query_chromadb(
-            self.img_collection,
-            query,
-            {"source": {"$in": relevant_papers['answer']}},
-            self.img_chunk_num,
-        )
-        text_context = self.search_with_reranker(query, raw_text_context, top_k=5)
-        return text_context, image_context, relevant_papers
-
-    def search_with_reranker(self, query: str, initial_results, top_k: int = 1) -> list[tuple[str, str, dict, float]]:
-        """
-        Refines initial search results by assessing the relevance of each document to the query.
-
-        Args:
-            self: The instance of the class.
-            query: The search query string.
-            initial_results: A dictionary containing the initial search results with keys 'documents', 'metadatas', and 'ids'.
-                             Each key maps to a list of corresponding values.
-            top_k: The number of top results to return after reranking (default is 1).
-
-        Returns:
-            list[tuple[str, str, dict, float]]: A list of tuples, where each tuple contains the document ID,
-                the document text, its metadata, and the reranking score. The list is sorted by the reranking score
-                in descending order, and only the top_k results are included.
-        """
-        metadatas = initial_results['metadatas'][0]
-        documents = initial_results["documents"][0]
-        ids = initial_results["ids"][0]
-
-        pairs = [[query, doc.replace("passage: ", "")] for doc in documents]
-
-        rerank_scores = self.rerank(pairs)
-
-        scored_docs = list(zip(ids, documents, metadatas, rerank_scores))
-        scored_docs.sort(key=lambda x: x[3], reverse=True)
-
-        return scored_docs[:top_k]
 
     def add_paper_summary_to_db(self, paper_name: str, parsed_paper: str, llm) -> None:
         """
@@ -373,37 +261,6 @@ class ChromaDatabaseStore:
         )
         print(f"Summary loaded for: {paper_name}")
 
-    def run_marker_pdf(self, p_path, out_path) -> None:
-        """
-        Executes a shell script to extract marker data from a PDF file.
-
-        This method utilizes a shell script to parse markers from a given PDF,
-        converting the paper content into a structured format suitable for analysis
-        and storage. The number of processing workers is configurable to manage
-        performance based on system resources.
-
-        Args:
-            p_path (str): The path to the input PDF file.
-            out_path (str): The path to save the output file containing marker data.
-
-        Returns:
-            None
-        """
-        try:
-            os.system(
-                " ".join(
-                    [
-                        "sh",
-                        os.path.join(ROOT_DIR, "ChemCoScientist/paper_analysis/marker_parsing.sh"),
-                        str(p_path),
-                        str(out_path),
-                        str(self.workers)
-                    ]
-                )
-            )
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            raise
 
     @staticmethod
     def get_embeddings(texts: list[str]) -> list[np.ndarray]:
@@ -419,9 +276,9 @@ class ChromaDatabaseStore:
         Raises:
             Exception: If the embedding service is unavailable or returns an error.
         """
-        embedding_service_url = "http://" + default_settings.embedding_host + ":" \
-                                + str(default_settings.embedding_port) \
-                                + default_settings.embedding_endpoint
+        embedding_service_url = "http://" + chroma_default_settings.embedding_host + ":" \
+                                + str(chroma_default_settings.embedding_port) \
+                                + chroma_default_settings.embedding_endpoint
         try:
             response = requests.post(
                 embedding_service_url,
@@ -434,46 +291,17 @@ class ChromaDatabaseStore:
             logger.error(f"Embedding service error: {str(e)}")
             raise
 
-    @staticmethod
-    def rerank(pairs: list[list[str]]) -> list[float]:
-        """
-        Reranks a list of document pairs to determine their relevance.
-
-        This method sends the pairs to a dedicated reranker service and retrieves scores
-        indicating the relevance of each pair. This helps to refine search results
-        and prioritize the most pertinent documents.
-
-        Args:
-            pairs: A list of pairs to rerank. Each pair is a list of strings representing documents.
-
-        Returns:
-            list[float]: A list of reranking scores, where each score corresponds to the input pair.
-                         Higher scores indicate greater relevance.
-
-        Raises:
-            Exception: If the reranker service is unavailable or returns an error.
-        """
-        reranker_service_url = "http://" + default_settings.reranker_host + ":" \
-                               + str(default_settings.reranker_port) \
-                               + default_settings.reranker_endpoint
-        try:
-            response = requests.post(
-                reranker_service_url,
-                json=pairs,
-                timeout=1000
-            )
-            response.raise_for_status()
-            return response.json()["scores"]
-        except Exception as e:
-            logger.error(f"Reranker service error: {str(e)}")
-            raise
 
 
 class DatabaseRagPipeline:
     def __init__(self):
         self.dispatcher = partial(ThreadPoolExecutor, max_workers=2)
-        self.parser = DocumentParser(USE_S3, s)
-        self.llm_url =
+        self.store = ChromaDatabaseStore()
+        self.parser = DocumentParser(USE_S3, )
+        self.llm_url = SUMMARY_LLM_URL
+
+    def _init_llm_model(self):
+        self.llm = load_llm_model(SUMMARY_LLM_URL, extra_body={"provider": {"only": allowed_providers}})
 
     def _init_database_storage(self):
         """
@@ -532,8 +360,7 @@ class DatabaseRagPipeline:
         parsed_paper, mapping = self.parser.clean_up_html(folder_path,metadata['paper_name'],text)
         print(f"Finished post-processing paper: {metadata['paper_name']}")
         documents = self.parser.html_chunking(parsed_paper, metadata['paper_name'])
-        llm = create_llm_connector(SUMMARY_LLM_URL, extra_body={"provider": {"only": allowed_providers}})
-        struct_llm = llm.with_structured_output(schema=ExpandedSummary)
+        struct_llm = self.llm.with_structured_output(schema=ExpandedSummary)
 
         print(f"Starting loading paper: {metadata['paper_name']}")
         process_local_store.add_paper_summary_to_db(str(metadata['paper_name']), parsed_paper, struct_llm)
@@ -543,6 +370,138 @@ class DatabaseRagPipeline:
         self.parser.clean_up_after_processing(folder_path)
 
 
+    @staticmethod
+    def rerank(pairs: list[list[str]]) -> list[float]:
+        """
+        Reranks a list of document pairs to determine their relevance.
+
+        This method sends the pairs to a dedicated reranker service and retrieves scores
+        indicating the relevance of each pair. This helps to refine search results
+        and prioritize the most pertinent documents.
+
+        Args:
+            pairs: A list of pairs to rerank. Each pair is a list of strings representing documents.
+
+        Returns:
+            list[float]: A list of reranking scores, where each score corresponds to the input pair.
+                         Higher scores indicate greater relevance.
+
+        Raises:
+            Exception: If the reranker service is unavailable or returns an error.
+        """
+        reranker_service_url = "http://" + chroma_default_settings.reranker_host + ":" \
+                               + str(chroma_default_settings.reranker_port) \
+                               + chroma_default_settings.reranker_endpoint
+        try:
+            response = requests.post(
+                reranker_service_url,
+                json=pairs,
+                timeout=1000
+            )
+            response.raise_for_status()
+            return response.json()["scores"]
+        except Exception as e:
+            logger.error(f"Reranker service error: {str(e)}")
+            raise
+
+    def search_with_reranker(self, query: str, initial_results, top_k: int = 1) -> list[tuple[str, str, dict, float]]:
+        """
+        Refines initial search results by assessing the relevance of each document to the query.
+
+        Args:
+            self: The instance of the class.
+            query: The search query string.
+            initial_results: A dictionary containing the initial search results with keys 'documents', 'metadatas', and 'ids'.
+                             Each key maps to a list of corresponding values.
+            top_k: The number of top results to return after reranking (default is 1).
+
+        Returns:
+            list[tuple[str, str, dict, float]]: A list of tuples, where each tuple contains the document ID,
+                the document text, its metadata, and the reranking score. The list is sorted by the reranking score
+                in descending order, and only the top_k results are included.
+        """
+        metadatas = initial_results['metadatas'][0]
+        documents = initial_results["documents"][0]
+        ids = initial_results["ids"][0]
+
+        pairs = [[query, doc.replace("passage: ", "")] for doc in documents]
+
+        rerank_scores = self.rerank(pairs)
+
+        scored_docs = list(zip(ids, documents, metadatas, rerank_scores))
+        scored_docs.sort(key=lambda x: x[3], reverse=True)
+
+        return scored_docs[:top_k]
+
+    def search_for_papers(self,
+                          query: str,
+                          chunks_num: int = None,
+                          final_chunks_num: int = None,
+                          meta_filter: dict = None) -> dict:
+        """
+        Retrieves relevant papers from the database based on a user's query.
+
+        This method performs an initial search to identify potentially relevant papers
+        and then refines the results using a reranker to improve accuracy and relevance.
+        The final results are returned as a list of paper sources.
+
+        Args:
+            self: The instance of the ChromaDBPaperStore class.
+            query (str): The search query string.
+            chunks_num (int, optional): The number of chunks to retrieve initially.
+                                         Defaults to self.sum_chunk_num if None.
+            final_chunks_num (int, optional): The number of final chunks to return.
+                                               Defaults to self.final_sum_chunk_num if None.
+
+        Returns:
+            dict: A dictionary containing a list of paper sources under the key 'answer'.
+        """
+        chunks_num = chunks_num if chunks_num else self.store.sum_chunk_num
+        final_chunks_num = final_chunks_num if final_chunks_num else self.store.final_sum_chunk_num
+
+        raw_docs = self.store.client.query_chromadb(
+            self.store.sum_collection, query, chunk_num=chunks_num, metadata_filter=meta_filter
+        )
+        docs = self.search_with_reranker(query, raw_docs, top_k=final_chunks_num)
+        res = [doc[2]["source"] for doc in docs]
+        return {'answer': res}
+
+    def retrieve_context(
+            self, query: str, relevant_papers: dict = None
+    ) -> tuple[list, dict, dict]:
+        """
+        Retrieves relevant information from text and images based on a user query.
+
+        This method aims to identify and extract the most pertinent data from a collection of documents,
+        facilitating quick access to key insights related to a specific research question.
+        It first identifies relevant papers and then utilizes vector similarity search to find corresponding text and image chunks.
+
+        Args:
+            query (str): The search query used to identify relevant information.
+            relevant_papers (list, optional): A list of pre-identified relevant papers. Defaults to None, in which case a search for relevant papers is initiated.
+
+        Returns:
+            tuple[list, dict]: A tuple containing the retrieved text and image context.
+                - text_context (list): A list of text chunks deemed most relevant to the query.
+                - image_context (dict): A dictionary containing image data associated with the query.
+        """
+        if not relevant_papers:
+            relevant_papers = self.search_for_papers(query)
+
+        raw_text_context = self.store.client.query_chromadb(
+            self.store.txt_collection,
+            query,
+            {"source": {"$in": relevant_papers['answer']}},
+            self.store.txt_chunk_num,
+        )
+        image_context = self.store.client.query_chromadb(
+            self.store.img_collection,
+            query,
+            {"source": {"$in": relevant_papers['answer']}},
+            self.store.img_chunk_num,
+        )
+        text_context = self.search_with_reranker(query, raw_text_context, top_k=5)
+        return text_context, image_context, relevant_papers
 
     # p_path = PAPERS_PATH
     # res_path = IMAGES_PATH

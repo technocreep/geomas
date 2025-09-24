@@ -1,6 +1,7 @@
 import typer
-from parser.core.utils.logger import Logger
+
 from parser.core.gk import GKParser
+from parser.core.utils.logger import Logger
 
 app = typer.Typer(
     help="PARSER: Cli tool for parsing papers and books"

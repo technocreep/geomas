@@ -1,17 +1,18 @@
-import re
-from time import sleep
-import aiohttp
 import asyncio
-import os
 import json
+import os
 import random
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
-import requests
-from parser.core.utils.logger import Logger
+import re
 from pathlib import Path
+from time import sleep
+from urllib.parse import urljoin
+
+import aiohttp
+import requests
+from bs4 import BeautifulSoup
 from tqdm import tqdm
 
+from parser.core.utils.logger import Logger
 
 
 class GKParser:

@@ -9,18 +9,21 @@ from unsloth import (
 import os
 from datetime import datetime
 from pathlib import Path
+from dotenv import load_dotenv
 
 import mlflow
 
-from dotenv import load_dotenv
-from mlflow.tracking import MlflowClient
-
-
 from geomas.core.config import prepare_settings
 from geomas.core.data.dataset import get_dataset
-from geomas.core.logging.logger import get_logger
-from geomas.core.report import posttrain_report, pretrain_report
+from geomas.core.inference.evaluation import is_pure_llm
+from geomas.core.logging import (
+    get_logger, 
+    _init_mlflow_logging, 
+    posttrain_report, 
+    pretrain_report
+)
 from geomas.core.utils import PROJECT_PATH
+
 
 load_dotenv(dotenv_path="/app/geomas/.env")
 logger = get_logger()
@@ -41,24 +44,10 @@ def cpt_train(
         str.maketrans("", "", "/:.%\"'")
     )
 
-    # always go first
-    mlflow.set_tracking_uri("http://localhost:5000")
-    client = MlflowClient()
-    prefix = f"{tag}-" if tag else ""
-    exp_name = f"{prefix}CPT-{correct_model_name}"
-    exp = client.get_experiment_by_name(exp_name)
-    if exp is None:
-        logger.info(f"Experiment {exp_name} not found. Creating...")
-        exp_id = client.create_experiment(
-        name=exp_name,
-        artifact_location=f"s3://mlflow/experiments/{exp_name}"
-    )
-    else:
-        logger.info(f"Experiment {exp_name} exists")
-        exp_id = exp.experiment_id
-
-    mlflow.set_experiment(experiment_id=exp_id)
-    mlflow.enable_system_metrics_logging()
+    _init_mlflow_logging(
+        correct_model_name=correct_model_name,
+        tag=tag
+        )
 
     # get necessery configs
     trainer_config, peft_config, model_config = prepare_settings(f"cpt-{correct_model_name}")
@@ -67,25 +56,16 @@ def cpt_train(
     with mlflow.start_run(run_name=run_name):
         max_seq_length = 2048
 
-        # need this becasuse gemma is multimodal
-        if "gemma" in model_name:
-            logger.info("Gemma model initialized with `FastModel` instead of `FastLanguageModel`")
-            model, tokenizer = FastModel.from_pretrained(
-                model_name=model_name,
-                **model_config
-            )
-            total_params = sum(p.numel() for p in model.parameters())
-            logger.info(f"Total params in model: {total_params:,}")
-            model = FastModel.get_peft_model(model, **peft_config)
-        else:
-            model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=model_name,
-                **model_config
-            )
-            total_params = sum(p.numel() for p in model.parameters())
-            logger.info(f"Total params in model: {total_params:,}")
-            model = FastLanguageModel.get_peft_model(model, **peft_config)
-            
+        # need this because e.g. gemma is multimodal
+        model_cls = FastLanguageModel if is_pure_llm(model_name) else FastModel # if multimodal
+        model, tokenizer = model_cls.from_pretrained(
+            model_name=model_name,
+            **model_config
+        )
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info(f"Total params in model: {total_params:,}")
+        model = model_cls.get_peft_model(model, **peft_config)
+ 
         trainable_params = model.get_nb_trainable_parameters()[0]
         trainable_percentage = 100 * trainable_params / total_params
         logger.info(
@@ -99,10 +79,7 @@ def cpt_train(
         def formatting_prompts_func(examples):
             return {"text": [example + EOS_TOKEN for example in examples["text"]]}
 
-        dataset = dataset.map(
-            formatting_prompts_func,
-            batched=True,
-        )
+        dataset = dataset.map(formatting_prompts_func,batched=True)
 
         logger.debug("Dataset samples:")
         for row in dataset[:2]["text"]:
@@ -142,9 +119,9 @@ def cpt_train(
         model.save_pretrained(save_directory, quantization_method=quantization_mode)
         tokenizer.save_pretrained(save_directory, quantization_method=quantization_mode)
 
-        # Report to MLFLOW
-        for d in (train_report, trainer_config, peft_config, model_config):
-            mlflow.log_params(d)
+        # Log all paramas to MLFLOW
+        mlflow.log_params(train_report | trainer_config | peft_config |model_config)
+        # Log model to MLFlow
         mlflow.transformers.log_model(
             transformers_model={"model": trainer.model, "tokenizer": tokenizer},
             name=correct_model_name,

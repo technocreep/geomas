@@ -1,8 +1,7 @@
 import yaml
 
-from geomas.core.utils import CONFIG_PATH
 from geomas.core.logging.logger import get_logger
-
+from geomas.core.utils import CONFIG_PATH
 
 logger = get_logger()
 

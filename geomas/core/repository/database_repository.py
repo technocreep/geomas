@@ -36,7 +36,7 @@ class ChromaSettings(BaseSettings):
     reranker_endpoint: str = "/rerank"
 
 
-settings = ChromaSettings()
-DATABASE_HOST = settings.chroma_host
-DATABASE_PORT = settings.chroma_port
-RESET_DATABASE = settings.allow_reset
+chroma_default_settings = ChromaSettings()
+DATABASE_HOST = chroma_default_settings .chroma_host
+DATABASE_PORT = chroma_default_settings .chroma_port
+RESET_DATABASE = chroma_default_settings .allow_reset

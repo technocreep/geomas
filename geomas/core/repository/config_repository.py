@@ -1,12 +1,17 @@
 from dataclasses import dataclass
 from enum import Enum
 from functools import reduce
-from inspect import signature, isclass
+from inspect import isclass, signature
 from typing import (
-    get_origin, get_args,
-    Any, Callable, Dict, Iterable, Literal, Optional, Union,
+    Any,
+    Callable,
+    Iterable,
+    Literal,
+    get_args,
+    get_origin,
 )
-import logging
+
+from torch.ao.quantization.utils import _normalize_kwargs
 
 __all__ = [
     'ConfigTemplate',
@@ -200,3 +205,16 @@ class PeftMuiltimodalConfigTemplate(ConfigTemplate):
     finetune_language_layers: bool = True
     finetune_attention_modules: bool = True
     finetune_mlp_modules: bool = True
+
+
+@dataclass
+class InferenceConfigTemplate(ConfigTemplate):
+    """Params for LLM inference"""
+    max_new_tokens: int = 64
+    do_sample: bool = True
+    temperature: float = 0.3
+    top_p: float = 0.95
+    top_k: int = 50
+    min_p: float = 0.0
+    num_beams: int = 1
+    eos_token_id: Any = None

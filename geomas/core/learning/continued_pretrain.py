@@ -54,34 +54,6 @@ class CPTrainer:
             str.maketrans("", "", "/:.%\"'")
             )
 
-    def _init_mlflow_logging(self,
-                             correct_model_name: str,
-                             tag: str = ""):
-        """Ensure the MLflow experiment exists and attach system metrics.
-
-        Args:
-            correct_model_name: Sanitised model identifier used for MLflow naming.
-            tag: Optional experiment prefix that groups related runs.
-        """
-
-        mlflow.set_tracking_uri("http://localhost:5000")
-        client = mlflow.MlflowClient()
-        prefix = f"{tag}-" if tag else ""
-        exp_name = f"{prefix}CPT-{correct_model_name}"
-        exp = client.get_experiment_by_name(exp_name)
-        if exp is None:
-            logger.info(f"Experiment {exp_name} not found. Creating...")
-            exp_id = client.create_experiment(
-            name=exp_name,
-            artifact_location=f"s3://mlflow/experiments/{exp_name}"
-        )
-        else:
-            logger.info(f"Experiment {exp_name} exists")
-            exp_id = exp.experiment_id
-
-        mlflow.set_experiment(experiment_id=exp_id)
-        mlflow.enable_system_metrics_logging()
-
     def load_configs(correct_model_name: str):
         """Loads sequentially `Trainer`, `PEFT`, `Model` configs"""
         return prepare_settings(f"cpt-{correct_model_name}")
@@ -102,7 +74,7 @@ class CPTrainer:
         logger.info(f"Dataset path: {self.dataset_path}")
         dataset_name = self.dataset_path.split("/")[-1]
         
-        self._init_mlflow_logging(
+        _init_mlflow_logging(
             correct_model_name=self.correct_model_name,
             tag=self.tag
             )

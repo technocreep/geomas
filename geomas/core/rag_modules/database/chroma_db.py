@@ -1,26 +1,41 @@
-from functools import partial
+
 import base64
 import logging
 import os
 import uuid
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from pathlib import Path
+
 import numpy as np
+import requests
 from langchain_core.documents.base import Document
 from langchain_core.messages import HumanMessage
-import requests
-from geomas.core.repository.constant_repository import USE_S3, VISION_LLM_URL, SUMMARY_LLM_URL
-from geomas.core.rag_modules.parser.rag_parser import DocumentParser
 
-from geomas.core.repository.constant_repository import (CONFIG_PATH, ROOT_DIR)
-from geomas.core.rag_modules.database.database_utils import ExpandedSummary, CustomEmbeddingFunction, \
-    ChromaDatabaseClient
-from geomas.core.repository.database_repository import DATABASE_PORT, DATABASE_HOST, RESET_DATABASE, \
-    chroma_default_settings
+from geomas.core.rag_modules.database.database_utils import (
+    ChromaDatabaseClient,
+    CustomEmbeddingFunction,
+    ExpandedSummary,
+)
+from geomas.core.rag_modules.parser.rag_parser import DocumentParser
+from geomas.core.repository.constant_repository import (
+    CONFIG_PATH,
+    ROOT_DIR,
+    SUMMARY_LLM_URL,
+    USE_S3,
+    VISION_LLM_URL,
+)
+from geomas.core.repository.database_repository import (
+    DATABASE_HOST,
+    DATABASE_PORT,
+    RESET_DATABASE,
+    chroma_default_settings,
+)
 from geomas.core.repository.parsing_repository import DatabaseChunkingConfig
 
 IMAGES_PATH = os.path.join(ROOT_DIR, os.environ["PARSE_RESULTS_PATH"])
 PAPERS_PATH = os.path.join(ROOT_DIR, os.environ["PAPERS_STORAGE_PATH"])
+
 
 allowed_providers = ["google-vertex", "azure"]
 logging.basicConfig(level=logging.INFO)
@@ -84,7 +99,6 @@ class ChromaDatabaseStore:
         self.model = load_llm_model(
             self.llm_url, temperature=0.015, top_p=0.95, extra_body={"provider": {"only": allowed_providers}}
         )
-
     def _init_chunking_params(self):
         self.sum_chunk_num = DatabaseChunkingConfig.sum_chunk_num
         self.final_sum_chunk_num = DatabaseChunkingConfig.final_sum_chunk_num
@@ -95,7 +109,7 @@ class ChromaDatabaseStore:
         self.sum_collection_name = os.getenv("SUMMARIES_COLLECTION_NAME")
         self.txt_collection_name = os.getenv("TEXTS_COLLECTION_NAME")
         self.img_collection_name = os.getenv("IMAGES_COLLECTION_NAME")
-        self.sum_collection = self.client.collection('get', self.sum_collection_name, CustomEmbeddingFunction)
+        self.sum_collection = self.client.collection('get',self.sum_collection_name, CustomEmbeddingFunction)
         self.txt_collection = self.client.collection('get', self.txt_collection_name, CustomEmbeddingFunction)
         self.img_collection = self.client.collection('get', self.img_collection_name, CustomEmbeddingFunction)
 
@@ -136,9 +150,9 @@ class ChromaDatabaseStore:
         messages = [
             HumanMessage(
                 content=[{"type": "text", "text": sys_prompt},
-                         {"type": "image_url",
-                          "image_url": {
-                              "url": f"data:image/jpeg;base64,{self._image_to_base64(image_path)}"}, }, ], )]
+                         { "type": "image_url",
+                           "image_url": {
+                            "url": f"data:image/jpeg;base64,{self._image_to_base64(image_path)}"},},],)]
         res = self.vision_llm_model.invoke(messages)
         return res.content
 
@@ -223,6 +237,7 @@ class ChromaDatabaseStore:
             ]
         )
 
+
     def add_paper_summary_to_db(self, paper_name: str, parsed_paper: str, llm) -> None:
         """
         Adds a paper summary to the document collection for efficient information retrieval.
@@ -258,6 +273,7 @@ class ChromaDatabaseStore:
         )
         print(f"Summary loaded for: {paper_name}")
 
+
     @staticmethod
     def get_embeddings(texts: list[str]) -> list[np.ndarray]:
         """
@@ -286,6 +302,7 @@ class ChromaDatabaseStore:
         except Exception as e:
             logger.error(f"Embedding service error: {str(e)}")
             raise
+
 
 
 class DatabaseRagPipeline:
@@ -351,8 +368,8 @@ class DatabaseRagPipeline:
             None
         """
         print(f"Starting post-processing paper: {metadata['paper_name']}")
-        # if USE_S3:
-        parsed_paper, mapping = self.parser.clean_up_html(folder_path, metadata['paper_name'], text)
+        #if USE_S3:
+        parsed_paper, mapping = self.parser.clean_up_html(folder_path,metadata['paper_name'],text)
         print(f"Finished post-processing paper: {metadata['paper_name']}")
         documents = self.parser.html_chunking(parsed_paper, metadata['paper_name'])
         struct_llm = self.llm.with_structured_output(schema=ExpandedSummary)
@@ -363,6 +380,7 @@ class DatabaseRagPipeline:
         process_local_store.store_images_in_chromadb_txt_format(str(folder_path), str(paper_name_to_load), mapping)
         print(f"Finished loading paper: {metadata['paper_name']}")
         self.parser.clean_up_after_processing(folder_path)
+
 
     @staticmethod
     def rerank(pairs: list[list[str]]) -> list[float]:

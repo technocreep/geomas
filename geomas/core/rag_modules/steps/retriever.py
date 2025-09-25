@@ -1,14 +1,13 @@
 import warnings
-from typing import Any, Optional, Callable, Dict
-
-from langchain_core.documents import Document
-
-from langchain_chroma import Chroma
-
 from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional
 
-from langchain_community.embeddings.sentence_transformer import SentenceTransformerEmbeddings
 from chromadb import ClientAPI
+from langchain_chroma import Chroma
+from langchain_community.embeddings.sentence_transformer import (
+    SentenceTransformerEmbeddings,
+)
+from langchain_core.documents import Document
 
 
 @dataclass

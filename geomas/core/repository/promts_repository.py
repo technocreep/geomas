@@ -1,6 +1,5 @@
 from langchain_core.prompts import PromptTemplate
 
-
 sys_prompt = (
     "You are a helpful chemist assistant. Answer USER QUESTION in a direct tone. Give a "
     " moderately detailed answer. Your audience is an expert, so be highly specific. If there are"

@@ -1,9 +1,15 @@
 import os
 from pathlib import Path
+
 from langchain_core.document_loaders import BaseLoader
 
-from geomas.core.data.custom_dataloaders import PDFLoader, WordDocumentLoader, RecursiveDirectoryLoader, ZipLoader, \
-    LangChainDocumentLoader
+from geomas.core.data.custom_dataloaders import (
+    LangChainDocumentLoader,
+    PDFLoader,
+    RecursiveDirectoryLoader,
+    WordDocumentLoader,
+    ZipLoader,
+)
 from geomas.core.repository.parsing_repository import DataTypeLoaderConfig as LoaderType
 
 

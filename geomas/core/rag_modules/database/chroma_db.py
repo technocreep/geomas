@@ -1,24 +1,36 @@
 
-from functools import partial
 import base64
 import logging
 import os
 import uuid
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from pathlib import Path
+
 import numpy as np
+import requests
 from langchain_core.documents.base import Document
 from langchain_core.messages import HumanMessage
-import requests
-from geomas.core.repository.constant_repository import USE_S3, VISION_LLM_URL, SUMMARY_LLM_URL
+
+from geomas.core.rag_modules.database.database_utils import (
+    ChromaDatabaseClient,
+    CustomEmbeddingFunction,
+    ExpandedSummary,
+)
 from geomas.core.rag_modules.parser.rag_parser import DocumentParser
-
-
-from geomas.core.repository.constant_repository import (CONFIG_PATH, ROOT_DIR)
-from geomas.core.rag_modules.database.database_utils import ExpandedSummary, CustomEmbeddingFunction, \
-    ChromaDatabaseClient
-from geomas.core.repository.database_repository import DATABASE_PORT, DATABASE_HOST, RESET_DATABASE, \
-    chroma_default_settings
+from geomas.core.repository.constant_repository import (
+    CONFIG_PATH,
+    ROOT_DIR,
+    SUMMARY_LLM_URL,
+    USE_S3,
+    VISION_LLM_URL,
+)
+from geomas.core.repository.database_repository import (
+    DATABASE_HOST,
+    DATABASE_PORT,
+    RESET_DATABASE,
+    chroma_default_settings,
+)
 from geomas.core.repository.parsing_repository import DatabaseChunkingConfig
 
 IMAGES_PATH = os.path.join(ROOT_DIR, os.environ["PARSE_RESULTS_PATH"])

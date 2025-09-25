@@ -1,12 +1,11 @@
 from pathlib import Path
-from typing import List, Union, Dict
+from typing import Dict, List, Union
 
 import torch
 from transformers import TextStreamer
 from unsloth import FastLanguageModel, FastModel
 
 from geomas.core.repository.config_repository import InferenceConfigTemplate
-
 
 
 def is_pure_llm(model_name: str) -> bool:

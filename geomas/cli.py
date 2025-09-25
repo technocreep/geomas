@@ -1,10 +1,13 @@
 import os
+from pathlib import Path
+from typing import List, Optional
 
 import typer
 
 from geomas.core.logger import get_logger
 from geomas.core.pdf_to_json import process_folder
 from geomas.core.utils import ALLOWED_MODELS, ALLOWED_QUANTS, PROJECT_PATH
+from geomas.core.repository.ocr_repository import get_ocr_adapter_names, is_supported_file
 
 app = typer.Typer(help="GEOMAS: CLI tool for LLM Training")
 logger = get_logger()
@@ -68,6 +71,91 @@ def makedataset(
     logger.info(f"Processing folder: <{source}>")
     process_folder(folder_path=source, output_folder=destination)
     logger.info(f"Saved to: <{destination}>")
+
+
+@app.command()
+def ocr(
+    source: str = typer.Argument(help="Path to file or directory for OCR processing"),
+    adapter: str = typer.Option("marker", help="OCR adapter to use"),
+    output_dir: str = typer.Option("output/markdown", help="Directory to save results"),
+    work_dir: Optional[str] = typer.Option(None, help="Working directory (temporary if not specified)"),
+    batch_size: int = typer.Option(8, help="Batch size for processing"),
+    language: str = typer.Option("auto", help="Language for OCR processing"),
+):
+    """Run OCR processing on documents"""
+    from geomas.core.api.ocr import process_document_ocr, process_documents_ocr
+    
+    source_path = Path(source)
+    
+    if not source_path.exists():
+        logger.error(f"Path does not exist: {source}")
+        raise typer.Exit(1)
+    
+    # Check adapter availability
+    available_adapters = get_ocr_adapter_names()
+    if adapter not in available_adapters:
+        logger.error(f"Unknown adapter: {adapter}. Available: {available_adapters}")
+        raise typer.Exit(1)
+    
+    try:
+        if source_path.is_file():
+            # Process single file
+            if not is_supported_file(str(source_path)):
+                logger.error(f"Unsupported file type: {source_path.suffix}")
+                raise typer.Exit(1)
+                
+            logger.info(f"Processing file {source_path} with adapter {adapter}")
+            result = process_document_ocr(
+                source_path,
+                adapter_name=adapter,
+                output_dir=output_dir,
+                work_dir=work_dir,
+                batch_size=batch_size,
+                language=language
+            )
+        else:
+            # Process directory
+            files = []
+            for file_path in source_path.rglob("*"):
+                if file_path.is_file() and is_supported_file(str(file_path)):
+                    files.append(file_path)
+            
+            if not files:
+                logger.info(f"No supported files found in {source_path}")
+                return
+                
+            logger.info(f"Found {len(files)} files for processing")
+            result = process_documents_ocr(
+                files,
+                adapter_name=adapter,
+                output_dir=output_dir, 
+                work_dir=work_dir,
+                batch_size=batch_size,
+                language=language
+            )
+            
+        logger.info(f"OCR processing completed. Created {len(result)} files:")
+        for file_path in result:
+            logger.info(f"  {file_path}")
+            
+    except Exception as e:
+        logger.error(f"Error during OCR processing: {e}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def ocr_adapters():
+    """Show available OCR adapters"""
+    try:
+        adapters = get_ocr_adapter_names()
+        if adapters:
+            logger.info("Available OCR adapters:")
+            for adapter in sorted(adapters):
+                logger.info(f"  - {adapter}")
+        else:
+            logger.info("No available OCR adapters found")
+    except Exception as e:
+        logger.error(f"Error getting adapters list: {e}")
 
 
 @app.command()

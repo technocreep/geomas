@@ -1,0 +1,64 @@
+# OCR Configuration for geomas
+# This file contains default settings for OCR processing
+
+# Default processing parameters
+batch_size: 8
+language: "auto"
+allow_network: false
+
+# Default directories
+input_dir: "input/raw"
+output_dir: "output/markdown"  
+work_dir: "work/ocr"
+
+# Default adapter
+default_adapter: "marker"
+
+# Timeout settings (in seconds)
+default_timeout: 300
+retry_attempts: 3
+
+# Processing limits
+max_batch_size: 32
+min_batch_size: 1
+
+# Supported file extensions
+supported_extensions:
+  - ".pdf"
+  - ".pptx"
+  - ".png" 
+  - ".jpg"
+  - ".jpeg"
+  - ".tiff"
+  - ".bmp"
+  - ".txt"
+  - ".csv"
+  - ".tsv"
+  - ".html"
+  - ".htm"
+  - ".doc"
+  - ".docx"
+  - ".xls"
+  - ".xlsx"
+
+# Adapter specific settings
+adapters:
+  marker:
+    description: "High-quality PDF processing with layout preservation"
+    supports_batch: true
+    supports_async: true
+    
+  mineru:
+    description: "Fast document processing with good accuracy"
+    supports_batch: true 
+    supports_async: true
+    
+  olmocr:
+    description: "Optimized OCR with language model integration"
+    supports_batch: false
+    supports_async: true
+    
+  qwen_vl:
+    description: "Vision-language model for complex document understanding"
+    supports_batch: false
+    supports_async: true

@@ -3,12 +3,18 @@ from copy import deepcopy
 import chromadb
 from langchain_community.embeddings.huggingface_hub import HuggingFaceHubEmbeddings
 from langchain_community.vectorstores.chroma import Chroma
+from protollm.rags.settings.chroma_settings import ChromaSettings
+from protollm.rags.settings.chroma_settings import settings as default_settings
+from protollm.rags.stores.chroma.chroma_loader import load_documents_to_chroma_db
+
 from geomas.core.rag_modules.steps.ranker import LLMReranker
-from geomas.core.rag_modules.steps.retriever import Retriever, DocsSearcherModels, RetrievingPipeline
+from geomas.core.rag_modules.steps.retriever import (
+    DocsSearcherModels,
+    Retriever,
+    RetrievingPipeline,
+)
 from geomas.core.repository.promts_repository import PROMPT_LLM_RESPONSE, PROMPT_RANK
 
-from protollm.rags.settings.chroma_settings import ChromaSettings, settings as default_settings
-from protollm.rags.stores.chroma.chroma_loader import load_documents_to_chroma_db
 
 class PipelineApi:
 

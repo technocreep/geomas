@@ -1,13 +1,13 @@
-from langchain_community.document_loaders.directory import _is_visible
 import zipfile
-from typing import Iterator, Union, Any, Optional, Sequence
 from json import load
-from tqdm import tqdm
 from pathlib import Path
-from typing import Iterator, Union, Any, Optional
+from typing import Any, Iterator, Optional, Sequence, Union
+
+from langchain_community.document_loaders.directory import _is_visible
 from langchain_core.document_loaders import BaseLoader, Blob
 from langchain_core.documents import Document
 from langchain_core.load import load as ln_load
+from tqdm import tqdm
 
 
 def preprocess_documents(func):

@@ -6,7 +6,11 @@ from langchain_core.language_models import LLM
 
 from geomas.core.rag_modules.database.dataloader import load_documents_to_chroma_db
 from geomas.core.rag_modules.steps.ranker import LLMReranker
-from geomas.core.rag_modules.steps.retriever import Retriever, DocsSearcherModels, RetrievingPipeline
+from geomas.core.rag_modules.steps.retriever import (
+    DocsSearcherModels,
+    Retriever,
+    RetrievingPipeline,
+)
 from geomas.core.repository.database_repository import chroma_default_settings
 from geomas.core.repository.promts_repository import PROMPT_LLM_RESPONSE, PROMPT_RANK
 

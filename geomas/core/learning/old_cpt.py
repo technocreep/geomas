@@ -17,10 +17,9 @@ from mlflow.tracking import MlflowClient
 
 
 from geomas.core.config import prepare_settings
-from geomas.core.dataset import get_dataset
-from geomas.core.logger import get_logger
-from geomas.core.report import posttrain_report, pretrain_report
+from geomas.core.logging import get_logger, posttrain_report, pretrain_report
 from geomas.core.utils import PROJECT_PATH
+from geomas.core.data.dataset import get_dataset
 
 load_dotenv(dotenv_path="/app/geomas/.env")
 logger = get_logger()

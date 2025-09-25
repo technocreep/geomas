@@ -72,7 +72,10 @@ class Evaluator:
 
 
 if __name__ == "__main__":
-    prompts = ["Hello, how are you?", "Explain quantum computing simply."]
+    prompts = [
+        "Полупромышленные (заводские) технологические пробы служат для проверки", 
+        "Метод ядерного гамма-резонанса (ЯГРМ) основан на эффекте Мессбауера (резонансе рассеянии гамма-квантов) и используется для"
+        ]
     inf_kwargs = {"max_new_tokens": 64}
     evaluator = Evaluator("unsloth/Qwen3-14B-Base-unsloth-bnb-4bit")
     outputs = evaluator.evaluate(prompts, inf_kwargs)

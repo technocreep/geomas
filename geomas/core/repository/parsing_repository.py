@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+
 from geomas.core.repository.config_repository import ConfigTemplate
 
 

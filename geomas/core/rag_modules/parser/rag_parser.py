@@ -1,8 +1,8 @@
 import logging
 import os
-from pathlib import Path
 import re
 import shutil
+from pathlib import Path
 
 from bs4 import BeautifulSoup, Tag
 from dotenv import load_dotenv
@@ -10,7 +10,7 @@ from langchain_text_splitters import HTMLSemanticPreservingSplitter
 from marker.config.parser import ConfigParser
 from marker.converters.pdf import PdfConverter
 from marker.models import create_model_dict
-from marker.output import text_from_rendered, save_output
+from marker.output import save_output, text_from_rendered
 
 from geomas.core.data.s3_data import S3BucketService
 from geomas.core.repository.constant_repository import USE_S3

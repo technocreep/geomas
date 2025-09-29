@@ -1,18 +1,23 @@
-from typing import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Callable
 
-from chromadb.utils.data_loaders import ImageLoader
 import chromadb
 from chromadb import Documents, EmbeddingFunction, Embeddings
 from chromadb.api.models import Collection
-from concurrent.futures import ThreadPoolExecutor
+from chromadb.utils.data_loaders import ImageLoader
 from pydantic import BaseModel, Field
 
 # from ChemCoScientist.paper_analysis.prompts import summarisation_prompt
 # from ChemCoScientist.paper_analysis.settings import allowed_providers
 # from ChemCoScientist.paper_analysis.settings import settings as default_settings
 # from CoScientist.paper_parser.s3_connection import s3_service
-from geomas.core.repository.database_repository import DATABASE_PORT, DATABASE_HOST, RESET_DATABASE
+from geomas.core.repository.database_repository import (
+    DATABASE_HOST,
+    DATABASE_PORT,
+    RESET_DATABASE,
+)
+
 
 class ExpandedSummary(BaseModel):
     """

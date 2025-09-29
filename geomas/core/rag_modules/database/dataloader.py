@@ -1,12 +1,15 @@
-from typing import Optional
 import logging
+from typing import Optional
 
 import chromadb
 from langchain_community.embeddings.huggingface_hub import HuggingFaceHubEmbeddings
 from langchain_community.vectorstores.chroma import Chroma
 
 from geomas.core.data.data_transformation import DataExtraction
-from geomas.core.repository.database_repository import ChromaSettings, chroma_default_settings
+from geomas.core.repository.database_repository import (
+    ChromaSettings,
+    chroma_default_settings,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

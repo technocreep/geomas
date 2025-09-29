@@ -51,7 +51,6 @@ class RagApi:
             [context.extend([Document(page_content='')] * (max_len_context - len(context)))
              for context in contexts if len(context) < max_len_context]
         else:
-
             context = RetrievingPipeline() \
                 .set_retrievers(retrievers) \
                 .set_collection_names(collection_names) \

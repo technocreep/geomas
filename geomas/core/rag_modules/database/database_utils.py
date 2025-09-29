@@ -30,7 +30,6 @@ class ExpandedSummary(BaseModel):
         )
     )
 
-
 class CustomEmbeddingFunction(EmbeddingFunction):
     """
     Creates embeddings from text using a custom function.
@@ -119,7 +118,7 @@ class ChromaDatabaseClient:
         """
         self.collection_methods[method](collection_metadata)
 
-    def _get_or_create_chroma_collection(
+    def get_or_create_chroma_collection(
             self,
             collection: str,
             embedding_function: EmbeddingFunction[Documents] | None = None,

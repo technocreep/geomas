@@ -12,6 +12,7 @@ import requests
 from langchain_core.documents.base import Document
 from langchain_core.messages import HumanMessage
 
+from geomas.core.inference.interface import LlmConnector
 from geomas.core.rag_modules.database.database_utils import (
     ChromaDatabaseClient,
     CustomEmbeddingFunction,
@@ -96,9 +97,9 @@ class ChromaDatabaseStore:
 
     def _init_llm_model(self):
         self.llm_url = VISION_LLM_URL
-        self.model = load_llm_model(
-            self.llm_url, temperature=0.015, top_p=0.95, extra_body={"provider": {"only": allowed_providers}}
-        )
+        self.inference_params = dict(temperature=0.015, top_p=0.95)
+        self.vision_llm_model = LlmConnector(self.llm_url)
+
     def _init_chunking_params(self):
         self.sum_chunk_num = DatabaseChunkingConfig.sum_chunk_num
         self.final_sum_chunk_num = DatabaseChunkingConfig.final_sum_chunk_num
@@ -153,8 +154,8 @@ class ChromaDatabaseStore:
                          { "type": "image_url",
                            "image_url": {
                             "url": f"data:image/jpeg;base64,{self._image_to_base64(image_path)}"},},],)]
-        res = self.vision_llm_model.invoke(messages)
-        return res.content
+        res = self.vision_llm_model.invoke(messages,inference_config=self.inference_params)
+        return res["response"]
 
     def store_text_chunks_in_chromadb(self, content: list, window_size: int = 15) -> None:
         """
@@ -309,11 +310,11 @@ class DatabaseRagPipeline:
     def __init__(self):
         self.dispatcher = partial(ThreadPoolExecutor, max_workers=2)
         self.store = ChromaDatabaseStore()
-        self.parser = DocumentParser(USE_S3, )
+        self.parser = DocumentParser()
         self.llm_url = SUMMARY_LLM_URL
 
     def _init_llm_model(self):
-        self.llm = load_llm_model(SUMMARY_LLM_URL, extra_body={"provider": {"only": allowed_providers}})
+        self.llm = LlmConnector(self.llm_url)
 
     def _init_database_storage(self):
         """
@@ -369,9 +370,9 @@ class DatabaseRagPipeline:
         """
         print(f"Starting post-processing paper: {metadata['paper_name']}")
         #if USE_S3:
-        parsed_paper, mapping = self.parser.clean_up_html(folder_path,metadata['paper_name'],text)
+        parsed_paper, mapping = self.parser.preprocessing(folder_path,metadata['paper_name'],text)
         print(f"Finished post-processing paper: {metadata['paper_name']}")
-        documents = self.parser.html_chunking(parsed_paper, metadata['paper_name'])
+        documents = self.parser.parse(parsed_paper, metadata['paper_name'])
         struct_llm = self.llm.with_structured_output(schema=ExpandedSummary)
 
         print(f"Starting loading paper: {metadata['paper_name']}")
@@ -379,7 +380,7 @@ class DatabaseRagPipeline:
         process_local_store.store_text_chunks_in_chromadb(documents)
         process_local_store.store_images_in_chromadb_txt_format(str(folder_path), str(paper_name_to_load), mapping)
         print(f"Finished loading paper: {metadata['paper_name']}")
-        self.parser.clean_up_after_processing(folder_path)
+        self.parser.postprocessing(folder_path)
 
 
     @staticmethod

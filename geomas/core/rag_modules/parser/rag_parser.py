@@ -6,7 +6,6 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup, Tag
 from geomas.core.data.s3_data import S3BucketService
-from geomas.core.inference.interface import LlmConnector
 from geomas.core.rag_modules.steps.chunking import TextChunker
 from geomas.core.repository.constant_repository import USE_S3, VISION_LLM_URL
 from geomas.core.repository.parsing_repository import ParsingPatternConfig
@@ -16,11 +15,31 @@ _log = logging.getLogger(__name__)
 
 class DocumentParser:
 
-    def __init__(self, chunking_params: dict = None):
-        self.vision_llm = LlmConnector(VISION_LLM_URL)
+    def __init__(self, chunking_params: dict = None, use_llm: bool = False):
+        """
+        Args:
+            chunking_params: Parameters for text chunking
+            use_llm: Whether to use LLM for image processing (requires GPU)
+        """
+        self.use_llm = use_llm
+        self.vision_llm = None
+        
+        # Lazy import and initialization - only if LLM is needed
+        if use_llm:
+            try:
+                from geomas.core.inference.interface import LlmConnector
+                self.vision_llm = LlmConnector(VISION_LLM_URL)
+            except Exception as e:
+                _log.warning(f"Could not initialize LLM connector: {e}")
+                self.use_llm = False
+        
         self.chunking_agent = TextChunker(chunking_params)
 
     def _llm_image_to_text(self, current_img, local_img_path, images):
+        if not self.use_llm or self.vision_llm is None:
+            _log.debug("Skipping LLM image processing (LLM not available)")
+            return images
+            
         cls_prompt = None
         prompt_func = None
         query = None

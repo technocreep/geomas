@@ -2,9 +2,11 @@ from langchain_text_splitters import HTMLSemanticPreservingSplitter, MarkdownTex
 import os
 import re
 
-from geomas.core.rag_modules.parser.rag_parser import PARSE_RESULTS_PATH
-from geomas.core.repository.constant_repository import USE_S3
-from geomas.core.repository.parsing_repository import ChunkingParamsConfig,ParsingPatternConfig
+from geomas.core.repository.constant_repository import USE_S3, ROOT_DIR
+from geomas.core.repository.parsing_repository import ChunkingParamsConfig, ParsingPatternConfig
+
+# Get PARSE_RESULTS_PATH from environment or use default
+PARSE_RESULTS_PATH = os.path.join(ROOT_DIR, os.environ.get("PARSE_RESULTS_PATH", "./parse_results"))
 
 
 class TextChunker:

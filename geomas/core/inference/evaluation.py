@@ -1,9 +1,9 @@
 from pathlib import Path
 from typing import Dict, List, Union
 
+from unsloth import FastLanguageModel, FastModel
 import torch
 from transformers import TextStreamer
-from unsloth import FastLanguageModel, FastModel
 
 from geomas.core.repository.config_repository import InferenceConfigTemplate
 

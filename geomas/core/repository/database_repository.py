@@ -1,44 +1,54 @@
-import os
+from __future__ import annotations
 
-from pydantic_settings import BaseSettings
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from geomas.core.repository.constant_repository import load_repository_env
+
+
+load_repository_env()
 
 
 class ChromaSettings(BaseSettings):
-    """
-    Manages settings for Chroma database and related components.
+    """Manages settings for Chroma database and related services."""
 
-        This class encapsulates configuration details for connecting to and interacting with
-        Chroma, an embedding database, as well as related embedding and reranking services.
+    model_config = SettingsConfigDict(env_prefix="", case_sensitive=False, extra="ignore")
 
-        Class Attributes:
-        - chroma_host
-        - chroma_port
-        - allow_reset
-        - embedding_host
-        - embedding_port
-        - embedding_endpoint
-        - reranker_host
-        - reranker_port
-        - reranker_endpoint
-    """
+    chroma_host: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CHROMA_HOST"),
+    )
+    chroma_port: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CHROMA_PORT"),
+    )
+    allow_reset: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHROMA_ALLOW_RESET"),
+    )
 
-    # Chroma DB settings
-    chroma_host: str = os.getenv("CHROMA_HOST")
-    chroma_port: int = os.getenv("CHROMA_PORT")
-    allow_reset: bool = False
-
-    # Documents collection's settings
-    embedding_host: str = os.getenv("EMBEDDING_HOST")
-    embedding_port: int = os.getenv("EMBEDDING_PORT")
+    embedding_host: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("EMBEDDING_HOST"),
+    )
+    embedding_port: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("EMBEDDING_PORT"),
+    )
     embedding_endpoint: str = "/embed"
 
-    # Reranker settings
-    reranker_host: str = os.getenv("RERANKER_HOST")
-    reranker_port: int = os.getenv("RERANKER_PORT")
+    reranker_host: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("RERANKER_HOST"),
+    )
+    reranker_port: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("RERANKER_PORT"),
+    )
     reranker_endpoint: str = "/rerank"
 
 
 chroma_default_settings = ChromaSettings()
-DATABASE_HOST = chroma_default_settings .chroma_host
-DATABASE_PORT = chroma_default_settings .chroma_port
-RESET_DATABASE = chroma_default_settings .allow_reset
+DATABASE_HOST = chroma_default_settings.chroma_host
+DATABASE_PORT = chroma_default_settings.chroma_port
+RESET_DATABASE = chroma_default_settings.allow_reset

@@ -1,36 +1,54 @@
+from __future__ import annotations
+
 import logging
+from pathlib import Path
 from typing import Optional
 
-import chromadb
-from langchain_community.embeddings.huggingface_hub import HuggingFaceHubEmbeddings
-from langchain_community.vectorstores.chroma import Chroma
-
-from geomas.core.data.data_transformation import DataExtraction
-from geomas.core.repository.database_repository import (
-    ChromaSettings,
-    chroma_default_settings,
-)
+from geomas.core.rag_modules.data_adapter import DataLoaderAdapter
+from geomas.core.rag_modules.database.chroma_db import ChromaDatabaseStore, DatabaseRagPipeline
+from geomas.core.rag_modules.parser import PARSER_DEPENDENCY_ERROR
+from geomas.core.repository.database_repository import ChromaSettings, chroma_default_settings
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def load_documents_to_chroma_db(settings: Optional[ChromaSettings] = chroma_default_settings,
-                                processing_batch_size: int = 100,
-                                loading_batch_size: int = 32,
-                                **kwargs) -> None:
+def load_documents_to_chroma_db(
+    settings: Optional[ChromaSettings] = chroma_default_settings,
+    *,
+    parser: DocumentParser | None = None,
+    store: ChromaDatabaseStore | None = None,
+) -> None:
+    """Ingest documents from ``settings.docs_collection_path`` into ChromaDB."""
 
-    logger.info(
-        f'Initializing batch generator with processing_batch_size: {processing_batch_size},'
-        f' loading_batch_size: {loading_batch_size}'
-    )
+    if settings is None:
+        raise ValueError("Chroma settings must be provided for document ingestion")
 
-    pipeline_settings = PipelineSettings.config_from_file(settings.docs_processing_config)
+    if parser is None:
+        try:
+            from geomas.core.rag_modules.parser.rag_parser import DocumentParser
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise RuntimeError(PARSER_DEPENDENCY_ERROR) from exc
 
-    store = "./"
-    # Documents loading and processing
-    DataExtraction(pipeline_settings) \
-        .go_to_next_step(docs_collection_path=settings.docs_collection_path) \
-        .update_docs_transformers(**kwargs) \
-        .go_to_next_step(batch_size=processing_batch_size) \
-        .load(store, loading_batch_size=loading_batch_size)
+        try:
+            parser = DocumentParser()
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise RuntimeError(PARSER_DEPENDENCY_ERROR) from exc
+
+    if store is None:
+        raise ValueError(
+            "ChromaDatabaseStore instance must be provided to ingest documents",
+        )
+
+    adapter = DataLoaderAdapter(parser=parser)
+    pipeline = DatabaseRagPipeline(store=store, parser=parser, data_loader=adapter)
+
+    target_path = Path(settings.docs_collection_path).expanduser()
+    result = pipeline.process(target_path)
+
+    if not result.success:
+        logger.info("No documents were ingested from '%s'", target_path)
+    else:
+        logger.info(
+            "Ingested %s documents from '%s'", result.documents_ingested, target_path
+        )

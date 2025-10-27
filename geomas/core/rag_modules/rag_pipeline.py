@@ -26,6 +26,7 @@ from geomas.core.rag_modules.steps.ranker import (
     build_chroma_reranker,
     build_llm_reranker,
 )
+from geomas.core.rag_modules.steps.retriever import BasicRetriever
 from geomas.core.repository.promts_repository import PROMPT_RANK
 from geomas.core.repository.rag_repository import (
     RAGConfig,
@@ -34,6 +35,9 @@ from geomas.core.repository.rag_repository import (
     RankingConfigTemplate,
     RetrievalConfigTemplate,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - import used for typing only
+    from geomas.core.inference.interface import LlmConnector as _LlmConnector
 
 logger = logging.getLogger(__name__)
 
@@ -77,105 +81,6 @@ def _create_llm_connector(
 
     params = dict(model_params or {})
     return RuntimeLlmConnector(url, params)
-
-
-class BasicRetriever:
-    """Perform similarity search over the configured Chroma store."""
-
-    def __init__(self, store: ChromaDatabaseStore) -> None:
-        self.store = store
-
-    def search(
-        self,
-        query: str,
-        *,
-        top_k: int,
-        filters: Mapping[str, object] | None = None,
-    ) -> Mapping[str, object]:
-        """Proxy ``query`` to the underlying :class:`ChromaDatabaseStore`."""
-
-        payload = self.store.search(query, top_k=top_k, filters=filters)
-
-        def _is_sequence(value: object) -> bool:
-            return isinstance(value, Sequence) and not isinstance(
-                value, (str, bytes, bytearray)
-            )
-
-        ids_field = payload.get("ids")
-        if not _is_sequence(ids_field) or not ids_field:
-            return payload
-
-        if len(ids_field) != 1:
-            return payload
-
-        first_row = ids_field[0]
-        if not _is_sequence(first_row):
-            return payload
-
-        limit = max(0, int(top_k))
-        if limit == 0:
-            filtered_indices: list[int] = []
-        else:
-            seen_ids: set[str] = set()
-            filtered_indices = []
-            for index, chunk_id in enumerate(first_row):
-                key = str(chunk_id)
-                if key in seen_ids:
-                    continue
-                seen_ids.add(key)
-                filtered_indices.append(index)
-                if len(filtered_indices) >= limit:
-                    break
-
-        if not filtered_indices and (limit != 0 or not first_row):
-            return payload
-
-        if limit == 0:
-            needs_update = bool(first_row)
-        else:
-            needs_update = len(filtered_indices) != len(first_row)
-
-        if not needs_update:
-            return payload
-
-        def _project_row(row: Sequence[object]) -> Sequence[object]:
-            if limit == 0:
-                selected: list[object] = []
-            else:
-                selected = []
-                for idx in filtered_indices:
-                    if idx < len(row):
-                        selected.append(row[idx])
-
-            if isinstance(row, list):
-                return selected
-            if isinstance(row, tuple):
-                return tuple(selected)
-            projected: list[object] = []
-            projected.extend(selected)
-            try:
-                return type(row)(projected)
-            except Exception:
-                return projected
-
-        for key, value in list(payload.items()):
-            if not _is_sequence(value) or not value:
-                continue
-
-            rebuilt_rows: list[Sequence[object]] = []
-            for row in value:
-                if not _is_sequence(row):
-                    rebuilt_rows = []
-                    break
-                rebuilt_rows.append(_project_row(row))
-
-            if rebuilt_rows:
-                try:
-                    payload[key] = type(value)(rebuilt_rows)
-                except Exception:
-                    payload[key] = rebuilt_rows
-
-        return payload
 
 
 class LmStudioClient:

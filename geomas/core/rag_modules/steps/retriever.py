@@ -1,6 +1,6 @@
 import warnings
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from chromadb import ClientAPI
 from langchain_chroma import Chroma
@@ -8,6 +8,123 @@ from langchain_community.embeddings.sentence_transformer import (
     SentenceTransformerEmbeddings,
 )
 from langchain_core.documents import Document
+
+from geomas.core.rag_modules.database.chroma_db import ChromaDatabaseStore
+
+
+def _is_nonstring_sequence(value: object) -> bool:
+    """Return ``True`` when ``value`` behaves like a sequence of results."""
+
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+def _extract_ids_row(payload: Mapping[str, object]) -> Sequence[object] | None:
+    """Return the first ids row when the response payload matches expectations."""
+
+    ids_field = payload.get("ids")
+    if not _is_nonstring_sequence(ids_field):
+        return None
+    if len(ids_field) != 1:
+        return None
+
+    first_row = ids_field[0]
+    if not _is_nonstring_sequence(first_row):
+        return None
+    return first_row
+
+
+def _unique_indices(ids_row: Sequence[object], limit: int) -> list[int]:
+    """Return indices representing the first unique ids up to ``limit``."""
+
+    if limit <= 0:
+        return []
+
+    seen: set[str] = set()
+    indices: list[int] = []
+    for position, chunk_id in enumerate(ids_row):
+        key = str(chunk_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        indices.append(position)
+        if len(indices) >= limit:
+            break
+    return indices
+
+
+def _coerce_row(row: Sequence[object], indices: Sequence[int]) -> Sequence[object]:
+    """Project ``row`` onto ``indices`` while preserving its container type."""
+
+    selected: list[object] = []
+    for index in indices:
+        if index < len(row):
+            selected.append(row[index])
+
+    if isinstance(row, list):
+        return selected
+    if isinstance(row, tuple):
+        return tuple(selected)
+
+    try:
+        return type(row)(selected)  # type: ignore[call-arg]
+    except Exception:
+        return selected
+
+
+def _project_payload(
+    payload: Mapping[str, object],
+    *,
+    indices: Sequence[int],
+) -> Mapping[str, object]:
+    """Return a payload projected to ``indices`` when deduplication is required."""
+
+    # Preserve the original container type when the payload is a mutable mapping.
+    try:
+        projected_payload: Dict[str, object] = dict(payload)
+    except Exception:
+        projected_payload = {key: value for key, value in payload.items()}
+
+    for key, value in payload.items():
+        if not _is_nonstring_sequence(value) or not value:
+            continue
+
+        rebuilt_rows: list[Sequence[object]] = []
+        aborted = False
+        for row in value:
+            if not _is_nonstring_sequence(row):
+                aborted = True
+                break
+            rebuilt_rows.append(_coerce_row(row, indices))
+
+        if aborted:
+            continue
+
+        try:
+            projected_payload[key] = type(value)(rebuilt_rows)  # type: ignore[call-arg]
+        except Exception:
+            projected_payload[key] = rebuilt_rows
+
+    return projected_payload
+
+
+def _deduplicate_payload(payload: Mapping[str, object], top_k: int) -> Mapping[str, object]:
+    """Remove duplicate ids from ``payload`` while respecting ``top_k``."""
+
+    ids_row = _extract_ids_row(payload)
+    if ids_row is None:
+        return payload
+
+    limit = max(0, int(top_k))
+    indices = _unique_indices(ids_row, limit)
+
+    if not indices and (limit != 0 or not ids_row):
+        return payload
+
+    needs_update = bool(ids_row) if limit == 0 else len(indices) != len(ids_row)
+    if not needs_update:
+        return payload
+
+    return _project_payload(payload, indices=indices)
 
 
 @dataclass
@@ -62,6 +179,25 @@ class Retriever:
 
 
 DocRetriever = Retriever
+
+
+class BasicRetriever:
+    """Perform similarity search over the configured :class:`ChromaDatabaseStore`."""
+
+    def __init__(self, store: ChromaDatabaseStore) -> None:
+        self.store = store
+
+    def search(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        filters: Mapping[str, object] | None = None,
+    ) -> Mapping[str, object]:
+        """Proxy ``query`` to the underlying store and deduplicate the results."""
+
+        payload = self.store.search(query, top_k=top_k, filters=filters)
+        return _deduplicate_payload(payload, top_k)
 
 
 class RetrievingPipeline:

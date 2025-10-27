@@ -49,9 +49,9 @@ def create_responder(
     def respond(message: str, _history: list[list[str]] | None = None) -> str:
         payload = pipeline.query(message, text_top_k=context_limit, rerank_top_k=context_limit)
         answer = payload.get("answer") or "The LM Studio connector did not return an answer."
-        context_summary = _format_rows(payload.get("text_context", []), limit=context_limit)
-        if context_summary:
-            return f"{answer}\n\nContext:\n{context_summary}"
+        # context_summary = _format_rows(payload.get("text_context", []), limit=context_limit)
+        # if context_summary:
+        #     return f"{answer}\n\nContext:\n{context_summary}"
         return answer
     return respond
 
@@ -63,15 +63,9 @@ def launch_ui(
 ) -> None:
     pipeline, _ = prepare_pipeline(documents_dir=documents_dir, settings=settings)
     responder = create_responder(pipeline)
-    description = (
-        "Ask questions about the bundled demo corpus. "
-        "GeoMAS handles chunking, retrieval, and reranking; LM Studio generates the final answer."
-    )
     try:
         gr.ChatInterface(
             responder,
-            title="GeoMAS + LM Studio Demo",
-            description=description,
             examples=list(DEFAULT_EXAMPLES),
         ).launch()
     finally:

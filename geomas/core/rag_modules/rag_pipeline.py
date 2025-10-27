@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import importlib.util
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Sequence
 
 import requests
 
@@ -12,7 +13,6 @@ from langchain_community.embeddings.sentence_transformer import (
 )
 from langchain_core.documents import Document
 
-from geomas.core.inference.interface import LlmConnector
 from geomas.core.rag_modules.data_adapter import DataLoaderAdapter
 from geomas.core.rag_modules.database.chroma_db import (
     ChromaDatabaseClient,
@@ -21,7 +21,11 @@ from geomas.core.rag_modules.database.chroma_db import (
 )
 from geomas.core.rag_modules.database.chroma_db import Embeddings, ProcessingResult
 from geomas.core.rag_modules.parser.rag_parser import DocumentParser
-from geomas.core.rag_modules.steps.ranker import LLMReranker
+from geomas.core.rag_modules.steps.ranker import (
+    LLMReranker,
+    build_chroma_reranker,
+    build_llm_reranker,
+)
 from geomas.core.repository.promts_repository import PROMPT_RANK
 from geomas.core.repository.rag_repository import (
     RAGConfig,
@@ -40,6 +44,41 @@ _SUPPORTED_CLIENT_OPTIONS: frozenset[str] = frozenset(
 )
 
 
+def _create_llm_connector(
+    url: str, model_params: Mapping[str, Any] | None
+) -> "_LlmConnector":
+    """Create the LLM connector for reranking once dependencies are present."""
+
+    if importlib.util.find_spec("unsloth") is None:
+        raise RuntimeError(
+            "LLM reranker requires the optional 'unsloth' dependency to be installed"
+        )
+
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover - torch is optional dependency
+        raise RuntimeError("LLM reranker requires the 'torch' package") from exc
+
+    cuda = getattr(torch, "cuda", None)
+    try:
+        is_available_callable = getattr(cuda, "is_available", None)
+        cuda_available = bool(
+            cuda and callable(is_available_callable) and is_available_callable()
+        )
+    except Exception as exc:  # pragma: no cover - defensive to surface dependency errors
+        raise RuntimeError("Failed to determine CUDA availability for LLM reranker") from exc
+
+    if not cuda_available:
+        raise RuntimeError(
+            "LLM reranker requires a CUDA-enabled torch installation"
+        )
+
+    from geomas.core.inference.interface import LlmConnector as RuntimeLlmConnector
+
+    params = dict(model_params or {})
+    return RuntimeLlmConnector(url, params)
+
+
 class BasicRetriever:
     """Perform similarity search over the configured Chroma store."""
 
@@ -55,7 +94,88 @@ class BasicRetriever:
     ) -> Mapping[str, object]:
         """Proxy ``query`` to the underlying :class:`ChromaDatabaseStore`."""
 
-        return self.store.search(query, top_k=top_k, filters=filters)
+        payload = self.store.search(query, top_k=top_k, filters=filters)
+
+        def _is_sequence(value: object) -> bool:
+            return isinstance(value, Sequence) and not isinstance(
+                value, (str, bytes, bytearray)
+            )
+
+        ids_field = payload.get("ids")
+        if not _is_sequence(ids_field) or not ids_field:
+            return payload
+
+        if len(ids_field) != 1:
+            return payload
+
+        first_row = ids_field[0]
+        if not _is_sequence(first_row):
+            return payload
+
+        limit = max(0, int(top_k))
+        if limit == 0:
+            filtered_indices: list[int] = []
+        else:
+            seen_ids: set[str] = set()
+            filtered_indices = []
+            for index, chunk_id in enumerate(first_row):
+                key = str(chunk_id)
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+                filtered_indices.append(index)
+                if len(filtered_indices) >= limit:
+                    break
+
+        if not filtered_indices and (limit != 0 or not first_row):
+            return payload
+
+        if limit == 0:
+            needs_update = bool(first_row)
+        else:
+            needs_update = len(filtered_indices) != len(first_row)
+
+        if not needs_update:
+            return payload
+
+        def _project_row(row: Sequence[object]) -> Sequence[object]:
+            if limit == 0:
+                selected: list[object] = []
+            else:
+                selected = []
+                for idx in filtered_indices:
+                    if idx < len(row):
+                        selected.append(row[idx])
+
+            if isinstance(row, list):
+                return selected
+            if isinstance(row, tuple):
+                return tuple(selected)
+            projected: list[object] = []
+            projected.extend(selected)
+            try:
+                return type(row)(projected)
+            except Exception:
+                return projected
+
+        for key, value in list(payload.items()):
+            if not _is_sequence(value) or not value:
+                continue
+
+            rebuilt_rows: list[Sequence[object]] = []
+            for row in value:
+                if not _is_sequence(row):
+                    rebuilt_rows = []
+                    break
+                rebuilt_rows.append(_project_row(row))
+
+            if rebuilt_rows:
+                try:
+                    payload[key] = type(value)(rebuilt_rows)
+                except Exception:
+                    payload[key] = rebuilt_rows
+
+        return payload
 
 
 class LmStudioClient:
@@ -135,23 +255,6 @@ class LmStudioClient:
         return str(content)
 
 
-class LengthReranker:
-    """Select the longest documents within a retrieval context."""
-
-    def rerank_context(
-        self,
-        documents: Sequence[Document],
-        question: str,
-        *,
-        top_k: int,
-    ) -> list[Document]:
-        """Order ``documents`` by length and return the ``top_k`` entries."""
-
-        del question
-        ordered = sorted(documents, key=lambda doc: len(doc.page_content), reverse=True)
-        return list(ordered[:top_k])
-
-
 class BaseRAGPipeline(ABC):
     """Common interface for all GeoMAS retrieval pipelines."""
 
@@ -165,7 +268,11 @@ class BaseRAGPipeline(ABC):
 
 
 class StandardRAGPipeline(BaseRAGPipeline):
-    """Reference implementation that wires the legacy database pipeline."""
+    """Reference implementation that wires the legacy database pipeline.
+
+    The pipeline optionally attaches an :class:`LLMReranker` when reranking is
+    enabled in the configuration; no alternative rerankers are constructed here.
+    """
 
     def __init__(
         self,
@@ -219,7 +326,15 @@ class StandardRAGPipeline(BaseRAGPipeline):
 
         retrieval_config = self.config_template.retrieval
         self.retriever = BasicRetriever(self.store)
-        self.reranker = self._initialise_reranker(self.config_template.ranking)
+        self.chroma_reranker = build_chroma_reranker(
+            self.config_template.ranking,
+            embedding_function=self.embedding_function,
+            collection_name=getattr(self.store, "collection_name", None),
+            logger=logger,
+        )
+        self.reranker: LLMReranker | None = self._initialise_reranker(
+            self.config_template.ranking
+        )
 
         (
             self._lm_client,
@@ -311,20 +426,22 @@ class StandardRAGPipeline(BaseRAGPipeline):
     def _initialise_reranker(
         self, ranking_config: RankingConfigTemplate
     ) -> Optional[LLMReranker]:
-        if not ranking_config.use_llm_reranking:
-            return None
+        """Initialise the optional LLM reranker when dependencies are available.
 
-        llm_url = ranking_config.llm_url
-        if not llm_url:
-            logger.warning("LLM reranking requested but no URL provided; skipping reranker")
-            return None
+        The connector factory defers importing the Unsloth-backed implementation
+        until after lightweight dependency checks succeed. This keeps
+        ``StandardRAGPipeline`` usable in environments where the optional stack
+        is not installed while still surfacing a clear warning when reranking
+        cannot be attached.
+        """
 
-        try:
-            connector = LlmConnector(llm_url, ranking_config.inference_config)
-            return LLMReranker(connector, PROMPT_RANK)
-        except Exception as exc:
-            logger.warning("Failed to initialise LLM reranker: %s", exc)
-            return None
+        return build_llm_reranker(
+            ranking_config,
+            connector_factory=_create_llm_connector,
+            reranker_factory=lambda connector, prompt: LLMReranker(connector, prompt),
+            prompt_template=PROMPT_RANK,
+            logger=logger,
+        )
 
     def _initialise_inference(
         self, inference_config: InferenceConfigTemplate
@@ -431,22 +548,32 @@ class StandardRAGPipeline(BaseRAGPipeline):
         )
 
         text_context = DatabaseRagPipeline._build_scored_context(raw_results, text_top_k)
-        if self.reranker and text_context:
-            documents = [
-                Document(page_content=doc_text, metadata=metadata)
-                for _, doc_text, metadata, _ in text_context
-            ]
-            reranked_documents = self.reranker.rerank_context(
-                documents,
-                question,
-                top_k=min(rerank_limit, len(documents)),
+        documents_for_context = self._documents_from_context(text_context)
+
+        if self.chroma_reranker and text_context:
+            chroma_documents = list(documents_for_context)
+            reranked_documents = self.chroma_reranker.rerank(question, chroma_documents)
+            ordered_context = self._map_documents_to_context(
+                reranked_documents,
+                chroma_documents,
+                text_context,
             )
-            ordered_context: list[tuple[str, str, dict, float]] = []
-            for reranked_doc in reranked_documents:
-                for doc_id, original_text, original_metadata, score in text_context:
-                    if reranked_doc.page_content == original_text:
-                        ordered_context.append((doc_id, original_text, original_metadata, score))
-                        break
+            if ordered_context:
+                text_context = ordered_context
+                documents_for_context = self._documents_from_context(text_context)
+
+        if self.reranker and text_context:
+            rerank_documents = list(documents_for_context)
+            reranked_documents = self.reranker.rerank_context(
+                rerank_documents,
+                question,
+                top_k=min(rerank_limit, len(rerank_documents)),
+            )
+            ordered_context = self._map_documents_to_context(
+                reranked_documents,
+                rerank_documents,
+                text_context,
+            )
             if ordered_context:
                 text_context = ordered_context
 
@@ -560,11 +687,79 @@ class StandardRAGPipeline(BaseRAGPipeline):
             self._call_shutdown(reranker)
             self.reranker = None
 
+        if getattr(self, "chroma_reranker", None) is not None:
+            self._call_shutdown(self.chroma_reranker)
+            self.chroma_reranker = None
+
         if getattr(self, "database_pipeline", None) is not None:
             self.database_pipeline = None
 
         self.data_loader = None
         self._lm_client = None
+
+    @staticmethod
+    def _documents_from_context(
+        text_context: Sequence[tuple[str, str, Mapping[str, object] | dict, float]]
+    ) -> list[Document]:
+        return [
+            Document(page_content=doc_text, metadata=dict(metadata))
+            for _, doc_text, metadata, _ in text_context
+        ]
+
+    @staticmethod
+    def _map_documents_to_context(
+        reranked_documents: Sequence[Document],
+        original_documents: Sequence[Document],
+        base_context: Sequence[tuple[str, str, Mapping[str, object] | dict, float]],
+    ) -> list[tuple[str, str, dict, float]]:
+        if not reranked_documents or not original_documents or not base_context:
+            return []
+
+        identity_map = {id(doc): index for index, doc in enumerate(original_documents)}
+        text_buckets: dict[str, list[int]] = {}
+        for index, (_, doc_text, _, _) in enumerate(base_context):
+            text_buckets.setdefault(str(doc_text), []).append(index)
+
+        used_indices: set[int] = set()
+        ordered_context: list[tuple[str, str, dict, float]] = []
+
+        for document in reranked_documents:
+            matched_index = None
+            doc_identity = identity_map.get(id(document))
+            if doc_identity is not None and doc_identity not in used_indices:
+                matched_index = doc_identity
+            else:
+                text_value = getattr(document, "page_content", None)
+                if text_value is not None:
+                    bucket = text_buckets.get(str(text_value), [])
+                    while bucket:
+                        candidate_index = bucket.pop(0)
+                        if candidate_index in used_indices:
+                            continue
+                        matched_index = candidate_index
+                        break
+
+            if matched_index is None:
+                continue
+
+            used_indices.add(matched_index)
+            original_text = base_context[matched_index]
+            ordered_context.append(
+                (
+                    original_text[0],
+                    original_text[1],
+                    dict(original_text[2]),
+                    original_text[3],
+                )
+            )
+
+            # Ensure future lookups respect the consumed entry.
+            text_value = base_context[matched_index][1]
+            bucket = text_buckets.get(str(text_value))
+            if bucket and matched_index in bucket:
+                bucket.remove(matched_index)
+
+        return ordered_context
 
 
 def create_standard_pipeline(
@@ -576,8 +771,8 @@ def create_standard_pipeline(
 
     resolved_config = RAGConfig.ensure(config)
     pipeline = StandardRAGPipeline(resolved_config)
-    if attach_reranker:
-        pipeline.reranker = LengthReranker()
+    if not attach_reranker:
+        pipeline.reranker = None
     return pipeline
 
 

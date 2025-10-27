@@ -137,18 +137,82 @@ class RetrievalConfigTemplate:
 
 
 @dataclass(slots=True)
+class ChromaRankingConfigTemplate:
+    """Configuration template controlling :class:`ChromaReranker`.
+
+    Attributes
+    ----------
+    enabled:
+        Flag enabling Chroma-based reranking when ``True``.
+    function:
+        Name of the embedding function exposed by
+        ``chromadb.utils.embedding_functions``. ``None`` preserves the default.
+    model_name:
+        Optional model identifier forwarded to the embedding constructor.
+    kwargs:
+        Arbitrary keyword arguments supplied to the embedding constructor.
+    """
+
+    enabled: bool = False
+    function: str | None = None
+    model_name: str | None = None
+    kwargs: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {"enabled": self.enabled}
+        if self.function is not None:
+            data["function"] = self.function
+        if self.model_name is not None:
+            data["model_name"] = self.model_name
+        if self.kwargs:
+            data["kwargs"] = dict(self.kwargs)
+        return data
+
+    def to_overrides(self) -> Dict[str, Any]:
+        """Return Chroma reranker overrides compatible with ``ChromaReranker``."""
+
+        overrides: Dict[str, Any] = {}
+        if self.function:
+            overrides["embedding_function_name"] = self.function
+        if self.model_name is not None:
+            overrides["embedding_model_name"] = self.model_name
+        if self.kwargs:
+            overrides["embedding_function_kwargs"] = dict(self.kwargs)
+        return overrides
+
+
+@dataclass(slots=True)
 class RankingConfigTemplate:
-    """Ranking section template."""
+    """Ranking section template.
+
+    The template controls both LLM-based and Chroma-based rerankers. The
+    ``chroma`` attribute exposes :class:`ChromaRankingConfigTemplate`, providing
+    strongly typed accessors for embedding selection.
+    """
 
     use_llm_reranking: bool = False
     llm_url: str = SUMMARY_LLM_URL
     inference_config: Dict[str, Any] = field(default_factory=dict)
+    chroma: ChromaRankingConfigTemplate = field(
+        default_factory=ChromaRankingConfigTemplate
+    )
+
+    @property
+    def use_chroma_reranking(self) -> bool:
+        return self.chroma.enabled
+
+    @use_chroma_reranking.setter
+    def use_chroma_reranking(self, value: bool) -> None:
+        self.chroma.enabled = bool(value)
 
     def to_dict(self) -> Dict[str, Any]:
+        chroma_config = self.chroma.to_dict()
         return {
             "use_llm_reranking": self.use_llm_reranking,
             "llm_url": self.llm_url,
             "inference_config": dict(self.inference_config),
+            "use_chroma_reranking": self.use_chroma_reranking,
+            "chroma": chroma_config,
         }
 
 
@@ -275,6 +339,24 @@ def _apply_template_updates(template: TemplateT, updates: Mapping[str, Any]) -> 
         if isinstance(template, ParsingConfigTemplate) and key == "chunking" and isinstance(value, Mapping):
             _apply_template_updates(template, value)
             continue
+        if isinstance(template, RankingConfigTemplate) and key == "use_chroma_reranking":
+            template.use_chroma_reranking = bool(value)
+            continue
+        if isinstance(template, ChromaRankingConfigTemplate):
+            if key in {"enabled", "use_chroma_reranking"}:
+                template.enabled = bool(value)
+                continue
+            if key in {"function", "embedding_function_name", "embedding_function"}:
+                template.function = None if value is None else str(value)
+                continue
+            if key in {"model_name", "embedding_model_name"}:
+                template.model_name = None if value is None else str(value)
+                continue
+            if key in {"kwargs", "embedding_function_kwargs"}:
+                template.kwargs.clear()
+                if isinstance(value, Mapping):
+                    template.kwargs.update(deepcopy(value))
+                continue
         if not hasattr(template, key):
             continue
         current = getattr(template, key)

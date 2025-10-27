@@ -1,5 +1,3 @@
-"""Chroma database pipeline and helpers."""
-
 from __future__ import annotations
 
 import logging
@@ -17,7 +15,6 @@ from geomas.core.rag_modules.data_adapter import AdapterResult, DataLoaderAdapte
 from geomas.core.rag_modules.database.database_utils import ChromaDatabaseClient
 
 logger = logging.getLogger(__name__)
-
 
 class ChromaDatabaseStore:
     """Persist and query document artefacts stored in ChromaDB."""

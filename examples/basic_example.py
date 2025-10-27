@@ -32,31 +32,6 @@ class LMStudioSettings:
     chroma_kwargs: dict[str, object] = field(default_factory=dict)
 
 
-def _env_flag(name: str, *, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    normalised = value.strip().lower()
-    if normalised in {"1", "true", "yes", "on"}:
-        return True
-    if normalised in {"0", "false", "no", "off"}:
-        return False
-    raise RuntimeError(f"Environment variable {name} must be a boolean flag, got: {value!r}")
-
-
-def _json_env(name: str) -> dict[str, object]:
-    payload = os.getenv(name)
-    if not payload:
-        return {}
-    try:
-        value = json.loads(payload)
-    except json.JSONDecodeError as exc:  # pragma: no cover - defensive guard
-        raise RuntimeError(f"Environment variable {name} must contain valid JSON") from exc
-    if not isinstance(value, dict):
-        raise RuntimeError(f"Environment variable {name} must contain a JSON object")
-    return value
-
-
 def load_lmstudio_settings() -> LMStudioSettings:
     load_dotenv()
     base_url = os.getenv("LM_STUDIO_URL")
@@ -75,12 +50,12 @@ def load_lmstudio_settings() -> LMStudioSettings:
         raise RuntimeError("LM Studio base URL could not be determined from the environment")
     if not model:
         raise RuntimeError("LM Studio model must be configured via LM_STUDIO_MODEL")
-    reranker_inference_kwargs = _json_env("LM_STUDIO_RERANKER_INFERENCE_KWARGS")
-    use_llm_reranker = _env_flag("GEOMAS_USE_LLM_RERANKER", default=True)
-    use_chroma_reranker = _env_flag("GEOMAS_USE_CHROMA_RERANKER", default=True)
+    reranker_inference_kwargs = os.getenv("LM_STUDIO_RERANKER_INFERENCE_KWARGS")
+    use_llm_reranker = os.getenv("GEOMAS_USE_LLM_RERANKER", default=True)
+    use_chroma_reranker = os.getenv("GEOMAS_USE_CHROMA_RERANKER", default=True)
     chroma_function = os.getenv("GEOMAS_CHROMA_RERANKER_FUNCTION", default='SentenceTransformersEmbeddingFunction')
     chroma_model = os.getenv("GEOMAS_CHROMA_RERANKER_MODEL", default='labse')
-    chroma_kwargs = _json_env("GEOMAS_CHROMA_RERANKER_KWARGS")
+    chroma_kwargs = os.getenv("GEOMAS_CHROMA_RERANKER_KWARGS")
 
     return LMStudioSettings(
         base_url=base_url.rstrip("/"),

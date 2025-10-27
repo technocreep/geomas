@@ -46,13 +46,6 @@ def _optional_float_env(name: str) -> float | None:
 def load_ollama_settings() -> OllamaSettings:
     load_dotenv()
     base_url = os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_BASE_URL")
-    if not base_url:
-        host = os.getenv("OLLAMA_HOST")
-        port = os.getenv("OLLAMA_PORT")
-        if host and port:
-            base_url = f"http://{host}:{port}"
-    if base_url:
-        base_url = base_url.rstrip("/")
     model = os.getenv("OLLAMA_MODEL", default='gpt-oss:20b')
     temperature = _float_env("OLLAMA_TEMPERATURE", default=0.0)
     timeout = _optional_float_env("OLLAMA_TIMEOUT")
@@ -144,10 +137,10 @@ def main() -> None:
     response = result["response"]
     print(f"Question: {result['question']}")
     print(f"Answer: {response.get('answer') or 'No answer returned.'}")
-    print("\nContext snippets:")
-    for entry in format_text_context(response.get("text_context", [])):
-        print(f"- {entry['document']} (score={entry['score']})")
-        print(f"  {entry['preview']}")
+    # print("\nContext snippets:")
+    # for entry in format_text_context(response.get("text_context", [])):
+    #     print(f"- {entry['document']} (score={entry['score']})")
+    #     print(f"  {entry['preview']}")
 
 
 if __name__ == "__main__":

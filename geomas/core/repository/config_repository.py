@@ -198,7 +198,9 @@ class PeftMuiltimodalConfigTemplate(ConfigTemplate):
 
 @dataclass
 class InferenceConfigTemplate(ConfigTemplate):
-    """Params for LLM inference"""
+    """Params for LLM inference providers."""
+    provider: str | None = None
+    service: str | None = None
     max_new_tokens: int = 64
     do_sample: bool = True
     temperature: float = 0.3

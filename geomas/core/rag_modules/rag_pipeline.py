@@ -13,6 +13,7 @@ from langchain_community.embeddings.sentence_transformer import (
 )
 from langchain_core.documents import Document
 
+from geomas.core.inference.ollama_client import OllamaClient
 from geomas.core.rag_modules.data_adapter import DataLoaderAdapter
 from geomas.core.rag_modules.database.chroma_db import (
     ChromaDatabaseClient,
@@ -32,12 +33,10 @@ from geomas.core.repository.rag_repository import (
     RAGConfig,
     RAGConfigTemplate,
     InferenceConfigTemplate,
+    IntegrationsConfigTemplate,
     RankingConfigTemplate,
     RetrievalConfigTemplate,
 )
-
-if TYPE_CHECKING:  # pragma: no cover - import used for typing only
-    from geomas.core.inference.interface import LlmConnector as _LlmConnector
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +59,7 @@ def _create_llm_connector(
 
     try:
         import torch
-    except ImportError as exc:  # pragma: no cover - torch is optional dependency
+    except ImportError as exc:
         raise RuntimeError("LLM reranker requires the 'torch' package") from exc
 
     cuda = getattr(torch, "cuda", None)
@@ -69,7 +68,7 @@ def _create_llm_connector(
         cuda_available = bool(
             cuda and callable(is_available_callable) and is_available_callable()
         )
-    except Exception as exc:  # pragma: no cover - defensive to surface dependency errors
+    except Exception as exc:
         raise RuntimeError("Failed to determine CUDA availability for LLM reranker") from exc
 
     if not cuda_available:
@@ -245,7 +244,11 @@ class StandardRAGPipeline(BaseRAGPipeline):
             self._lm_client,
             self._lm_temperature,
             self._lm_system_prompt,
-        ) = self._initialise_inference(self.config_template.inference)
+            self._lm_provider_label,
+        ) = self._initialise_inference(
+            self.config_template.inference,
+            self.config_template.integrations,
+        )
 
         self._closed = False
 
@@ -349,53 +352,118 @@ class StandardRAGPipeline(BaseRAGPipeline):
         )
 
     def _initialise_inference(
-        self, inference_config: InferenceConfigTemplate
-    ) -> tuple[LmStudioClient | None, float, str | None]:
-        """Initialise LM Studio inference when configuration is available."""
+        self,
+        inference_config: InferenceConfigTemplate,
+        integrations_config: IntegrationsConfigTemplate,
+    ) -> tuple[LmStudioClient | OllamaClient | None, float, str | None, str | None]:
+        """Initialise chat inference according to the configured provider."""
 
         enabled = getattr(inference_config, "enable_remote_services", True)
-        params = getattr(inference_config, "params", {})
-        if not enabled or not isinstance(params, Mapping):
-            return None, 0.0, None
+        if not enabled:
+            return None, 0.0, None, None
 
-        base_url = params.get("base_url")
-        model = params.get("model")
+        params = getattr(inference_config, "params", {})
+        params_map: Mapping[str, Any]
+        if isinstance(params, Mapping):
+            params_map = params
+        else:
+            params_map = {}
+
+        def _normalise_provider(value: object | None) -> str | None:
+            if isinstance(value, str):
+                candidate = value.strip().lower()
+                return candidate or None
+            return None
+
+        provider = _normalise_provider(getattr(inference_config, "provider", None))
+        provider = provider or _normalise_provider(getattr(inference_config, "service", None))
+        provider = (
+            _normalise_provider(params_map.get("provider"))
+            or _normalise_provider(params_map.get("service"))
+            or provider
+        )
+
+        if provider is None and getattr(integrations_config, "enable_ollama", False):
+            provider = "ollama"
+
+        if provider not in {"ollama"}:
+            provider = "lm_studio"
+
+        provider_label = "Ollama" if provider == "ollama" else "LM Studio"
+
+        def _parse_float(value: object, default: float, *, warning: str) -> float:
+            if value is None:
+                return default
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                logger.warning("Invalid %s '%s'; defaulting to %.1f", warning, value, default)
+                return default
+
+        raw_temperature = params_map.get("temperature", 0.0)
+        temperature = _parse_float(raw_temperature, 0.0, warning=f"{provider_label} temperature")
+
+        raw_system_prompt = params_map.get("system_prompt")
+        system_prompt = str(raw_system_prompt) if raw_system_prompt is not None else None
+
+        raw_timeout = params_map.get("timeout")
+        timeout_value: float | None
+        if raw_timeout is None:
+            timeout_value = None
+        else:
+            timeout_value = _parse_float(
+                raw_timeout, 0.0, warning=f"{provider_label} timeout"
+            )
+            if timeout_value == 0.0:
+                timeout_value = 0.0 if isinstance(raw_timeout, (int, float)) else None
+
+        if provider == "ollama":
+            model = params_map.get("model")
+            if not model:
+                logger.info("Ollama inference skipped: model missing")
+                return None, temperature, system_prompt, provider_label
+
+            host = params_map.get("host") or params_map.get("base_url")
+            if not host:
+                host = getattr(integrations_config, "ollama_endpoint", None)
+
+            try:
+                client = OllamaClient(
+                    model=str(model),
+                    host=str(host) if host else None,
+                    timeout=timeout_value,
+                )
+            except Exception as exc:
+                logger.warning("Failed to initialise Ollama client: %s", exc)
+                return None, temperature, system_prompt, provider_label
+
+            return client, temperature, system_prompt, provider_label
+
+        if not isinstance(params, Mapping):
+            logger.info("LM Studio inference skipped: configuration missing")
+            return None, 0.0, None, provider_label
+
+        base_url = params_map.get("base_url")
+        model = params_map.get("model")
         if not base_url or not model:
             logger.info("LM Studio inference skipped: base_url or model missing")
-            return None, 0.0, None
+            return None, temperature, system_prompt, provider_label
 
-        headers = params.get("headers") if isinstance(params.get("headers"), Mapping) else None
-        timeout_value: float | None = None
-        raw_timeout = params.get("timeout")
-        if raw_timeout is not None:
-            try:
-                timeout_value = float(raw_timeout)
-            except (TypeError, ValueError):
-                logger.warning("Invalid LM Studio timeout value '%s'; ignoring", raw_timeout)
-
-        raw_temperature = params.get("temperature", 0.0)
-        try:
-            temperature = float(raw_temperature)
-        except (TypeError, ValueError):
-            logger.warning("Invalid LM Studio temperature '%s'; defaulting to 0.0", raw_temperature)
-            temperature = 0.0
-
-        system_prompt = params.get("system_prompt")
-        if system_prompt is not None:
-            system_prompt = str(system_prompt)
+        headers_param = params_map.get("headers")
+        headers = headers_param if isinstance(headers_param, Mapping) else None
 
         try:
             client = LmStudioClient(
                 base_url=str(base_url),
                 model=str(model),
                 headers={str(k): str(v) for k, v in dict(headers or {}).items()},
-                timeout=timeout_value,
+                timeout=timeout_value if timeout_value is not None else None,
             )
         except Exception as exc:
             logger.warning("Failed to initialise LM Studio client: %s", exc)
-            return None, temperature, system_prompt
+            return None, temperature, system_prompt, provider_label
 
-        return client, temperature, system_prompt
+        return client, temperature, system_prompt, provider_label
 
     def ingest_documents(self, documents_path: str, **kwargs: Any) -> bool:
         try:
@@ -519,7 +587,8 @@ class StandardRAGPipeline(BaseRAGPipeline):
 
         context_block = self._format_context(text_context)
         if not context_block:
-            logger.info("LM Studio generation skipped: no retrieval context available")
+            provider_label = getattr(self, "_lm_provider_label", None) or "LLM"
+            logger.info("%s generation skipped: no retrieval context available", provider_label)
             return None
 
         messages: list[dict[str, str]] = []
@@ -536,7 +605,9 @@ class StandardRAGPipeline(BaseRAGPipeline):
         try:
             return client.generate(messages, temperature=self._lm_temperature)
         except Exception as exc:
-            logger.warning("LM Studio generation failed: %s", exc)
+            provider_label = getattr(self, "_lm_provider_label", None) or "LLM"
+            message = str(exc).splitlines()[0]
+            logger.warning("%s generation failed: %s", provider_label, message)
             return None
 
     @staticmethod

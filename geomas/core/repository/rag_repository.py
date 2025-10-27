@@ -232,16 +232,28 @@ class DataConfigTemplate:
 
 @dataclass(slots=True)
 class InferenceConfigTemplate:
-    """Inference section template."""
+    """Inference section template for remote LLM providers.
+
+    ``provider`` or ``service`` may be set to ``"lm_studio"`` (default) or
+    ``"ollama"`` to control which chat client :class:`StandardRAGPipeline`
+    initialises. The ``params`` mapping is forwarded to the selected connector.
+    """
 
     enable_remote_services: bool = True
+    provider: str | None = None
+    service: str | None = None
     params: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "enable_remote_services": self.enable_remote_services,
             "params": dict(self.params),
         }
+        if self.provider is not None:
+            data["provider"] = self.provider
+        if self.service is not None:
+            data["service"] = self.service
+        return data
 
 
 @dataclass(slots=True)

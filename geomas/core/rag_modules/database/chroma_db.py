@@ -238,6 +238,63 @@ class ChromaDatabaseStore:
             ]
         )
 
+    def store_visual_documents(
+            self,
+            documents: list[Document],
+            collection_name: str,
+            window_size: int = 15
+    ) -> None:
+        """
+        Store visual document descriptions in ChromaDB.
+
+        This method stores Document objects containing visual descriptions
+        (e.g., geological maps descriptions) into a specified ChromaDB collection.
+        It generates embeddings for the text descriptions and stores them with metadata.
+
+        Args:
+            documents: List of Document objects with visual descriptions
+            collection_name: Name of the ChromaDB collection to store documents
+            window_size: Batch size for embedding generation
+
+        Returns:
+            None
+        """
+        if not documents:
+            logger.warning("No documents to store")
+            return
+
+        # Get or create collection for visual documents
+        visual_collection = self.client.get_or_create_chroma_collection(
+            collection=collection_name,
+            embedding_function=CustomEmbeddingFunction
+        )
+
+        # Prepare documents and metadata
+        doc_texts = [doc.page_content for doc in documents]
+        doc_metadatas = [{"type": "visual", **doc.metadata} for doc in documents]
+
+        # Generate embeddings in batches
+        chunks_num = len(doc_texts)
+        if chunks_num > window_size:
+            embeddings = []
+            cuts = int(chunks_num / window_size)
+            for i in range(cuts + 1):
+                embeddings += self.get_embeddings(
+                    doc_texts[i * window_size:(i + 1) * window_size]
+                )
+        else:
+            embeddings = self.get_embeddings(doc_texts)
+
+        # Store in ChromaDB
+        visual_collection.add(
+            ids=[str(uuid.uuid4()) for _ in range(len(documents))],
+            documents=doc_texts,
+            embeddings=embeddings,
+            metadatas=doc_metadatas
+        )
+
+        logger.info(f"Stored {len(documents)} visual documents in collection '{collection_name}'")
+
 
     def add_paper_summary_to_db(self, paper_name: str, parsed_paper: str, llm) -> None:
         """

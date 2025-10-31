@@ -343,6 +343,135 @@ def format_instruct_dataset(
 
 
 @app.command()
+def process_visual_docs(
+    source: str = typer.Argument(help="Path to folder with image files (geological maps, schemes)"),
+    collection_name: str = typer.Option(
+        "visual_documents",
+        help="ChromaDB collection name for storing visual document descriptions"
+    ),
+    detailed: bool = typer.Option(
+        False,
+        help="Generate detailed descriptions (slower but more informative)"
+    ),
+    output_json: str = typer.Option(
+        "",
+        help="Optional: Save descriptions to JSON file instead of ChromaDB"
+    ),
+):
+    """Process visual documents (geological maps, schemes) and store descriptions in ChromaDB."""
+    from pathlib import Path
+    from geomas.core.vision.visual_data_processor import VisualDataProcessor
+    from geomas.core.rag_modules.database.chroma_db import ChromaDatabaseStore
+    import json
+
+    source_path = Path(source)
+    if not source_path.exists():
+        logger.error(f"Source path does not exist: {source}")
+        return
+
+    logger.info(f"Processing visual documents from: {source}")
+    logger.info(f"Detailed descriptions: {detailed}")
+    
+    try:
+        # Initialize processor
+        processor = VisualDataProcessor(detailed_descriptions=detailed)
+        
+        # Process documents
+        documents = processor.process_visual_documents(
+            document_dir=str(source_path),
+            source_name=source_path.name
+        )
+        
+        if not documents:
+            logger.warning("No documents were processed")
+            return
+        
+        logger.info(f"Generated {len(documents)} document descriptions")
+        
+        # Save to JSON if specified
+        if output_json:
+            output_path = Path(output_json)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            data = []
+            for doc in documents:
+                data.append({
+                    "text": doc.page_content,
+                    "metadata": doc.metadata
+                })
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"Saved {len(documents)} descriptions to: {output_json}")
+        else:
+            # Store in ChromaDB
+            logger.info(f"Storing descriptions in ChromaDB collection: {collection_name}")
+            
+            store = ChromaDatabaseStore()
+            store._init_llm_model()
+            
+            # Store visual documents in ChromaDB
+            store.store_visual_documents(
+                documents=documents,
+                collection_name=collection_name,
+                window_size=15
+            )
+            
+            logger.info(f"✅ Successfully stored {len(documents)} visual document descriptions!")
+            
+    except Exception as e:
+        logger.error(f"Processing failed: {e}")
+        raise
+
+
+@app.command()
+def describe_image(
+    image_path: str = typer.Argument(help="Path to image file"),
+    detailed: bool = typer.Option(
+        False,
+        help="Generate detailed description"
+    ),
+    output: str = typer.Option(
+        "",
+        help="Optional: Save description to file"
+    ),
+):
+    """Generate textual description of a single image using Vision LLM."""
+    from pathlib import Path
+    from geomas.core.vision.visual_data_processor import VisualDataProcessor
+
+    img_path = Path(image_path)
+    if not img_path.exists():
+        logger.error(f"Image not found: {image_path}")
+        return
+
+    logger.info(f"Generating description for: {image_path}")
+    logger.info(f"Detailed: {detailed}")
+    
+    try:
+        processor = VisualDataProcessor(detailed_descriptions=detailed)
+        description = processor.describe_image(str(img_path))
+        
+        if output:
+            output_path = Path(output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(description)
+            logger.info(f"Description saved to: {output}")
+        else:
+            print("\n=== Image Description ===")
+            print(description)
+            print("=" * 40)
+        
+        logger.info("✅ Description generated successfully!")
+        
+    except Exception as e:
+        logger.error(f"Failed to generate description: {e}")
+        raise
+
+
+@app.command()
 def health():
     logger.info("Checking core libs...")
     try:

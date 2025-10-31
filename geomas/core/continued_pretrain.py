@@ -25,7 +25,6 @@ from geomas.core.utils import PROJECT_PATH
 load_dotenv(dotenv_path="/app/geomas/.env")
 logger = get_logger()
 
-
 def cpt_train(
     model_name: str,
     dataset_path: Path,
@@ -61,10 +60,18 @@ def cpt_train(
     mlflow.enable_system_metrics_logging()
 
     # get necessery configs
-    trainer_config, peft_config, model_config = prepare_settings(f"cpt-{correct_model_name}")
+    trainer_config, peft_config, model_config, add_conf = prepare_settings(f"cpt-{correct_model_name}")
 
     run_name = f"{correct_model_name}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%s')}"
     with mlflow.start_run(run_name=run_name):
+        
+        for d in (trainer_config, peft_config, model_config):
+            mlflow.log_params(d)
+
+        mlflow.log_params({
+            'lora_rank': peft_config['r'],
+            'lora_alpha': peft_config['lora_alpha']
+        })
         max_seq_length = 2048
 
         # need this becasuse gemma is multimodal
@@ -74,6 +81,13 @@ def cpt_train(
                 model_name=model_name,
                 **model_config
             )
+            
+            if add_conf['unfreeze_embeddings']:
+                logger.info("Unfreezing embedding layers...")
+                for name, param in model.named_parameters():
+                    if "embed_tokens" in name or "embed_positions" in name:
+                        param.requires_grad = True
+
             total_params = sum(p.numel() for p in model.parameters())
             logger.info(f"Total params in model: {total_params:,}")
             model = FastModel.get_peft_model(model, **peft_config)
@@ -82,6 +96,13 @@ def cpt_train(
                 model_name=model_name,
                 **model_config
             )
+
+            if add_conf['unfreeze_embeddings']:
+                logger.info("Unfreezing embedding layers...")
+                for name, param in model.named_parameters():
+                    if "embed_tokens" in name or "embed_positions" in name:
+                        param.requires_grad = True
+
             total_params = sum(p.numel() for p in model.parameters())
             logger.info(f"Total params in model: {total_params:,}")
             model = FastLanguageModel.get_peft_model(model, **peft_config)
@@ -92,29 +113,32 @@ def cpt_train(
             f"With rank {peft_config['r']} number of trainable params: {trainable_params:,}, {trainable_percentage:.2f}%"
         )
 
-        dataset = get_dataset(dataset_path)
 
         EOS_TOKEN = tokenizer.eos_token
+        logger.info(f"EOS TOKEN: {EOS_TOKEN}")
 
         def formatting_prompts_func(examples):
             return {"text": [example + EOS_TOKEN for example in examples["text"]]}
 
-        dataset = dataset.map(
-            formatting_prompts_func,
-            batched=True,
-        )
+        dataset = get_dataset(dataset_path)
+        dataset = dataset.map(formatting_prompts_func, batched=True)
 
-        logger.debug("Dataset samples:")
-        for row in dataset[:2]["text"]:
+        logger.debug("Train Dataset samples:")
+        for row in dataset['train'][:2]["text"]:
+            logger.debug(row)
+        logger.debug("Test Dataset samples:")
+        for row in dataset['test'][:2]["text"]:
             logger.debug(row)
 
         trainer = UnslothTrainer(
             model=model,
             tokenizer=tokenizer,
-            train_dataset=dataset,
+            train_dataset=dataset['train'],
+            eval_dataset=dataset['test'],
             dataset_text_field="text",
             max_seq_length=max_seq_length,
             dataset_num_proc=8,
+            # compute_metrics=compute_metrics,
             args=UnslothTrainingArguments(
                 **trainer_config,
                 fp16=not is_bfloat16_supported(),
@@ -134,7 +158,7 @@ def cpt_train(
             max_memory=max_memory,
             trainer_stats=trainer_stats,
         )
-
+        mlflow.log_params(train_report)
         # Save
         save_directory = PROJECT_PATH + "/../" + "models" + "/" + correct_model_name
         os.makedirs(save_directory, exist_ok=True)
@@ -145,11 +169,55 @@ def cpt_train(
         # Report to MLFLOW
         for d in (train_report, trainer_config, peft_config, model_config):
             mlflow.log_params(d)
+
+        mlflow.log_params({
+            'lora_rank': peft_config['r'],
+            'lora_alpha': peft_config['lora_alpha']
+        })
+        
         mlflow.transformers.log_model(
             transformers_model={"model": trainer.model, "tokenizer": tokenizer},
             name=correct_model_name,
             # task="text_generation",
         )
+
+
+        from transformers import TextIteratorStreamer
+        from threading import Thread
+        import textwrap
+
+        text_streamer = TextIteratorStreamer(tokenizer)
+        max_print_width = 100
+
+        inputs = tokenizer(
+        [
+            "Интерпретация результатов геохимических поисков не может ограничиваться выявлением аномалий и подсчетом их продуктивности. Среди аномалий необходимо диагностировать "
+        ]*1, return_tensors = "pt").to("cuda")
+
+        generation_kwargs = dict(
+            inputs,
+            streamer = text_streamer,
+            max_new_tokens = 256,
+            use_cache = True,
+        )
+        thread = Thread(target = model.generate, kwargs = generation_kwargs)
+        thread.start()
+
+        length = 0
+        for j, new_text in enumerate(text_streamer):
+            if j == 0:
+                wrapped_text = textwrap.wrap(new_text, width = max_print_width)
+                length = len(wrapped_text[-1])
+                wrapped_text = "\n".join(wrapped_text)
+                print(wrapped_text, end = "")
+            else:
+                length += len(new_text)
+                if length >= max_print_width:
+                    length = 0
+                    print()
+                print(new_text, end = "")
+            pass
+        pass
 
 
 if __name__ == "__main__":

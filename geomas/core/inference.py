@@ -23,14 +23,15 @@ from unsloth import FastLanguageModel
 
 
 questions = [
-    "Полупромышленные (заводские) технологические пробы служат для проверки эффективности переработки руды в заводских условиях или в опытных цехах по схеме непрерывного технологического процесса. Полузаводские испытания осуществляются только тогда,",
-    "Метод ядерного гамма-резонанса (ЯГРМ) основан на эффекте Мессбауера (резонансе рассеянии гамма-квантов) и используется для определения содержания олова или касситерита. Источником излуче-ния",
+    # "Полупромышленные (заводские) технологические пробы служат для проверки эффективности переработки руды в заводских условиях или в опытных цехах по схеме непрерывного технологического процесса. Полузаводские испытания осуществляются только тогда,",
+    # "Метод ядерного гамма-резонанса (ЯГРМ) основан на эффекте Мессбауера (резонансе рассеянии гамма-квантов) и используется для определения содержания олова или касситерита. Источником излуче-ния",
+    "Для диффузии в бесконечном полупространстве из тонкого вертикального пласта распределение содержаний мигрирующего элемента описывается случайной функцией Гаусса. С учетом отражающей границы «земля — воздух» для больших значений времени миграции распределение на земной поверхности выражается зависимостью"
 ]
 
-answers = [
-    "когда намечается переработка нового типа руды, не освоенного промышленностью, или руда имеет весьма сложную техно-логию переработки. В большинстве случаев к полузаводским испытаниям не прибегают, ограничиваясь валовыми технологическими пробами.",
-    " изотоп 119Sn. При неподвижном источнике происходит резонансное поглощение гамма-квантов атомами олова (природным изотопом 119Sn). Сравнение результатов резонанса при подвижном ис-точнике и поглощения при неподвижном источнике позволяет судить о содержании олова"
-]
+# answers = [
+#     "когда намечается переработка нового типа руды, не освоенного промышленностью, или руда имеет весьма сложную техно-логию переработки. В большинстве случаев к полузаводским испытаниям не прибегают, ограничиваясь валовыми технологическими пробами.",
+#     " изотоп 119Sn. При неподвижном источнике происходит резонансное поглощение гамма-квантов атомами олова (природным изотопом 119Sn). Сравнение результатов резонанса при подвижном ис-точнике и поглощения при неподвижном источнике позволяет судить о содержании олова"
+# ]
 
 token_limits = [
     64,
@@ -66,9 +67,13 @@ BASE_MODEL_PATH = "unsloth/Qwen3-14B-Base-unsloth-bnb-4bit"
 # CPT_MODEL_PATH = "/app/outputs/mistral-7b-v03-bnb-4bit/checkpoint-1808"
 # BASE_MODEL_PATH = "unsloth/mistral-7b-v0.3-bnb-4bit"
 
+
+
+CPT_MODEL_PATH = "/app/outputs/Mistral-Nemo-Base-2407-cpt_preprocessed_full_ds/checkpoint-267"
+
 model, tokenizer = FastLanguageModel.from_pretrained(
-    # model_name      = CPT_MODEL_PATH,
-    model_name      = BASE_MODEL_PATH,
+    model_name      = CPT_MODEL_PATH,
+    # model_name      = BASE_MODEL_PATH,
     max_seq_length  = 2048,
     dtype           = None,
     load_in_4bit    = True,
@@ -85,8 +90,8 @@ for i, prompt in enumerate(questions):
     print("=========")
     print(f"Question:")
     print(f"{prompt}")
-    print(f'Ground Truth:')
-    print(f'{answers[i]}')
+    # print(f'Ground Truth:')
+    # print(f'{answers[i]}')
 
     for lim in token_limits:
 
@@ -100,16 +105,26 @@ for i, prompt in enumerate(questions):
         #     num_beams      = 1,
         #     eos_token_id   = tokenizer.eos_token_id,
         # )
-        qwen_kwargs = dict(
+        kwargs = dict(
             max_new_tokens = lim,
-            do_sample      = True,
-            temperature    = 0.3,
+            do_sample      = False,
+            temperature    = 0.5,
             top_p          = 0.95,
             top_k          = 50,
             min_p          = 0.0,
             num_beams      = 1,
             eos_token_id   = tokenizer.eos_token_id,
         )
+        # qwen_kwargs = dict(
+        #     max_new_tokens = lim,
+        #     do_sample      = True,
+        #     temperature    = 0.3,
+        #     top_p          = 0.95,
+        #     top_k          = 50,
+        #     min_p          = 0.0,
+        #     num_beams      = 1,
+        #     eos_token_id   = tokenizer.eos_token_id,
+        # )
         # mistral_kwargs = dict(
         #     max_new_tokens = lim,
         #     do_sample      = True,
@@ -123,32 +138,32 @@ for i, prompt in enumerate(questions):
 
         text_streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
         f1 = []
-        for retry in range(3):
-            print(f"Response [{retry}] - max tokens: {lim}:")
-            with torch.inference_mode():
-                output = model.generate(
-                    **inputs, 
-                    streamer=text_streamer, 
-                    **qwen_kwargs
-                    # **mistral_kwargs
-                    )
+        # for retry in range(3):
+            # print(f"Response [{retry}] - max tokens: {lim}:")
+        with torch.inference_mode():
+            output = model.generate(
+                **inputs, 
+                streamer=text_streamer, 
+                **kwargs
+                # **mistral_kwargs
+                )
                 
-            response = tokenizer.decode(output[0], skip_special_tokens=True).split(prompt)[-1]
+        response = tokenizer.decode(output[0], skip_special_tokens=True).split(prompt)[-1]
             
             # from rouge_score import rouge_scorer
-            from bert_score import score as bert_score
+            # from bert_score import score as bert_score
 
             
-            P, R, F1 = bert_score(
-                [response], 
-                [answers[i]], 
-                # lang='ru'
-                model_type="xlm-roberta-large"
-                )
+            # P, R, F1 = bert_score(
+            #     [response], 
+            #     [answers[i]], 
+            #     # lang='ru'
+            #     model_type="xlm-roberta-large"
+            #     )
             
-            f1.append(F1)
-            print(f"F1 score - {F1}")
-            print(f"Precision score - {P}")
-            print(f"Recall score - {R}")
-            print("=========")
-        print(f"Average F1: {sum(f1) / 3}")
+        #     f1.append(F1)
+        #     print(f"F1 score - {F1}")
+        #     print(f"Precision score - {P}")
+        #     print(f"Recall score - {R}")
+        #     print("=========")
+        # print(f"Average F1: {sum(f1) / 3}")

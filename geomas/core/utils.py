@@ -46,7 +46,4 @@ ALLOWED_MODELS = {
     "gemma-3-1b": "unsloth/gemma-3-1b-pt",
     "gemma-3-27b": "unsloth/gemma-3-27b-pt",
     "qwen3-30b-4bit": "unsloth/Qwen3-30B-A3B-Base-bnb-4bit",
-
-    # "qwen3-30b": "unsloth/Qwen3-30B-A3B-Base"
-    # "gemma-7b": "unslosth/gemma-7b-bnb-4bit",
 }

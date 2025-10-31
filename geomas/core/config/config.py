@@ -16,7 +16,7 @@ def load_config(model_name):
 
 def prepare_settings(model_name: str) -> tuple[dict, dict]:
     config = load_config(model_name)
-    return config["UnslothTrainingArguments"], config["PEFTParams"], config["ModelConfig"]
+    return config["UnslothTrainingArguments"], config["PEFTParams"], config["ModelConfig"], config["Additional"]
 
 
 if __name__ == "__main__":

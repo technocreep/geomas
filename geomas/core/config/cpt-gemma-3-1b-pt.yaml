@@ -36,3 +36,7 @@ PEFTParams:
   random_state: 3407
   use_rslora: true
   loftq_config: null
+
+
+Additional:
+  unfreeze_embeddings: true

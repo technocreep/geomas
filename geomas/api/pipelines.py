@@ -57,7 +57,7 @@ class PipelineApi:
         chroma_client = init_chroma_client()
 
         docs_searcher_models = DocsSearcherModels(embedding_model=embedding_function, chroma_client=chroma_client)
-        retriever = DocRetriever(top_k=k, docs_searcher_models=docs_searcher_models)
+        retriever = Retriever(top_k=k, docs_searcher_models=docs_searcher_models)
 
         return retriever.retrieve_top(collection_name=collection, query=query)
 

@@ -58,7 +58,7 @@ class RetrievingPipeline:
         self._retrievers: Optional[list[DocRetriever]] = None
         self._collection_names: Optional[list[str]] = None
 
-    def set_retrievers(self, retrievers: list[DocRetriever]) -> 'RetrievingPipeline':
+    def set_retrievers(self, retrievers: list[Retriever]) -> 'RetrievingPipeline':
         self._retrievers = retrievers
         return self
 

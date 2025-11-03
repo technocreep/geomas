@@ -23,18 +23,18 @@ class ChromaSettings(BaseSettings):
     """
 
     # Chroma DB settings
-    chroma_host: str = os.getenv("CHROMA_HOST")
-    chroma_port: int = os.getenv("CHROMA_PORT")
+    chroma_host: str = os.getenv("CHROMA_HOST", "localhost")
+    chroma_port: int = int(os.getenv("CHROMA_PORT", "8000"))
     allow_reset: bool = False
 
     # Documents collection's settings
-    embedding_host: str = os.getenv("EMBEDDING_HOST")
-    embedding_port: int = os.getenv("EMBEDDING_PORT")
+    embedding_host: str = os.getenv("EMBEDDING_HOST", "localhost")
+    embedding_port: int = int(os.getenv("EMBEDDING_PORT", "8001"))
     embedding_endpoint: str = "/embed"
 
     # Reranker settings
-    reranker_host: str = os.getenv("RERANKER_HOST")
-    reranker_port: int = os.getenv("RERANKER_PORT")
+    reranker_host: str = os.getenv("RERANKER_HOST", "localhost")
+    reranker_port: int = int(os.getenv("RERANKER_PORT", "8002"))
     reranker_endpoint: str = "/rerank"
 
 

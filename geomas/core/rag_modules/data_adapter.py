@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -17,7 +18,6 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True, frozen=True)
 class AdapterResult:
     """Container describing the outcome of a loader invocation."""
-
     documents: list[Document]
     cleanup_paths: tuple[Path, ...] = ()
 
@@ -27,7 +27,6 @@ class AdapterResult:
 
 class DataLoaderAdapter:
     """Load raw artefacts and adapt them for the LangChain ecosystem."""
-
     HTML_SUFFIXES = {".html", ".htm"}
     MARKDOWN_SUFFIXES = {".md", ".markdown", ".mmd"}
     TEXT_SUFFIXES = {".txt"}
@@ -95,11 +94,14 @@ class DataLoaderAdapter:
         return documents, cleanup_paths
 
     def _iter_supported_files(self, root: Path) -> Iterator[Path]:
-        for entry in sorted(root.rglob("*")):
-            if not entry.is_file():
-                continue
-            if self._is_supported(entry):
-                yield entry
+        for current_root, dirs, files in os.walk(root, followlinks=True):
+            dirs.sort()
+            files.sort()
+            base_path = Path(current_root)
+            for filename in files:
+                candidate = base_path / filename
+                if candidate.is_file() and self._is_supported(candidate):
+                    yield candidate
 
     def _is_supported(self, path: Path) -> bool:
         return path.suffix.lower() in self.allowed_suffixes
@@ -266,7 +268,6 @@ def format_text_context(
     limit: int = 3,
 ) -> list[dict[str, object]]:
     """Summarise raw ``text_context`` entries for presentation layers."""
-
     formatted: list[dict[str, object]] = []
     for index, entry in enumerate(text_context):
         if index >= limit:

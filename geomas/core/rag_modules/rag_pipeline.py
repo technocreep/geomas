@@ -6,12 +6,13 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+import requests
+
 from langchain_community.embeddings.sentence_transformer import (
     SentenceTransformerEmbeddings,
 )
 from langchain_core.documents import Document
 
-from geomas.core.inference.lmstudio_client import LmStudioClient
 from geomas.core.inference.ollama_client import OllamaClient
 from geomas.core.rag_modules.data_adapter import DataLoaderAdapter
 from geomas.core.rag_modules.database.chroma_db import (
@@ -26,7 +27,10 @@ from geomas.core.rag_modules.steps.ranker import (
     build_chroma_reranker,
     build_llm_reranker,
 )
-from geomas.core.rag_modules.steps.retriever import BasicRetriever
+from geomas.core.rag_modules.steps.retriever import (
+    DEFAULT_SIMILARITY_THRESHOLD,
+    BasicRetriever,
+)
 from geomas.core.repository.promts_repository import PROMPT_RANK
 from geomas.core.repository.rag_repository import (
     RAGConfig,
@@ -36,6 +40,7 @@ from geomas.core.repository.rag_repository import (
     RankingConfigTemplate,
     RetrievalConfigTemplate,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +55,6 @@ def _create_llm_connector(
     url: str, model_params: Mapping[str, Any] | None
 ) -> "_LlmConnector":
     """Create the LLM connector for reranking once dependencies are present."""
-
     if importlib.util.find_spec("unsloth") is None:
         raise RuntimeError(
             "LLM reranker requires the optional 'unsloth' dependency to be installed"
@@ -81,6 +85,81 @@ def _create_llm_connector(
     return RuntimeLlmConnector(url, params)
 
 
+class LmStudioClient:
+    """Thin HTTP client targeting an LM Studio OpenAI-compatible endpoint."""
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        if not base_url:
+            raise ValueError("LM Studio base_url must be provided")
+        if not model:
+            raise ValueError("LM Studio model must be provided")
+
+        self._endpoint = f"{base_url.rstrip('/')}/chat/completions"
+        self._model = model
+        self._headers = {str(key): str(value) for key, value in dict(headers or {}).items()}
+        self._timeout = timeout
+
+    def generate(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        temperature: float,
+    ) -> str:
+        """Send ``messages`` to the LM Studio endpoint and return the response."""
+        payload = {
+            "model": self._model,
+            "messages": [dict(message) for message in messages],
+            "temperature": temperature,
+        }
+
+        try:
+            response = requests.post(
+                self._endpoint,
+                json=payload,
+                headers=self._headers or None,
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Failed to reach LM Studio endpoint: {exc}") from exc
+
+        if response.status_code >= 400:
+            snippet = response.text.strip()
+            raise RuntimeError(
+                "LM Studio request failed with status "
+                f"{response.status_code}: {snippet or response.reason}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError("LM Studio response was not valid JSON") from exc
+
+        choices = data.get("choices")
+        if not isinstance(choices, Sequence) or not choices:
+            raise RuntimeError("LM Studio response did not include any choices")
+
+        first_choice = choices[0]
+        if isinstance(first_choice, Mapping):
+            message_payload = first_choice.get("message")
+            if isinstance(message_payload, Mapping):
+                content = message_payload.get("content")
+            else:
+                content = first_choice.get("text")
+        else:
+            content = None
+
+        if not content:
+            raise RuntimeError("LM Studio response was missing completion content")
+
+        return str(content)
+
+
 class BaseRAGPipeline(ABC):
     """Common interface for all GeoMAS retrieval pipelines."""
 
@@ -99,7 +178,6 @@ class StandardRAGPipeline(BaseRAGPipeline):
     The pipeline optionally attaches an :class:`LLMReranker` when reranking is
     enabled in the configuration; no alternative rerankers are constructed here.
     """
-
     def __init__(
         self,
         config: Optional[Mapping[str, Any] | RAGConfig | RAGConfigTemplate] = None,
@@ -138,6 +216,27 @@ class StandardRAGPipeline(BaseRAGPipeline):
             shared_embedding or getattr(self.store, "embedding", None)
         )
 
+        retrieval_config = self.config_template.retrieval
+        raw_chunk_limit = getattr(retrieval_config, "chunk_limit", 3)
+        try:
+            chunk_limit = int(raw_chunk_limit)
+        except (TypeError, ValueError):
+            chunk_limit = 3
+        if chunk_limit <= 0:
+            chunk_limit = 1
+        retrieval_config.chunk_limit = chunk_limit
+
+        raw_threshold = getattr(
+            retrieval_config,
+            "score_threshold",
+            DEFAULT_SIMILARITY_THRESHOLD,
+        )
+        try:
+            score_threshold = float(raw_threshold)
+        except (TypeError, ValueError):
+            score_threshold = 0.0
+        retrieval_config.score_threshold = score_threshold
+
         self.database_pipeline = DatabaseRagPipeline(
             store=self.store,
             parser=self.parser,
@@ -150,8 +249,12 @@ class StandardRAGPipeline(BaseRAGPipeline):
         self.data_loader = self.database_pipeline.data_loader
         self.last_ingest_result: ProcessingResult | None = None
 
-        retrieval_config = self.config_template.retrieval
-        self.retriever = BasicRetriever(self.store)
+        self._retrieval_chunk_limit = chunk_limit
+        self.retriever = BasicRetriever(
+            self.store,
+            chunk_limit=chunk_limit,
+            score_threshold=score_threshold,
+        )
         self.chroma_reranker = build_chroma_reranker(
             self.config_template.ranking,
             embedding_function=self.embedding_function,
@@ -177,7 +280,6 @@ class StandardRAGPipeline(BaseRAGPipeline):
     @staticmethod
     def _call_shutdown(target: object | None) -> bool:
         """Attempt to call a shutdown hook on ``target`` when present."""
-
         if target is None:
             return False
 
@@ -194,7 +296,6 @@ class StandardRAGPipeline(BaseRAGPipeline):
 
     def _shutdown_embedding(self, embedding: object | None) -> None:
         """Release resources held by ``embedding`` when possible."""
-
         if embedding is None:
             return
 
@@ -230,7 +331,6 @@ class StandardRAGPipeline(BaseRAGPipeline):
         collection_name: str,
     ) -> ChromaDatabaseStore:
         """Create a Chroma-backed vector store for ``config``."""
-
         store_config = dict(config or {})
         store_type = str(store_config.get("type", _SUPPORTED_VECTOR_STORE_TYPE)).lower()
         if store_type != _SUPPORTED_VECTOR_STORE_TYPE:
@@ -264,7 +364,6 @@ class StandardRAGPipeline(BaseRAGPipeline):
         is not installed while still surfacing a clear warning when reranking
         cannot be attached.
         """
-
         return build_llm_reranker(
             ranking_config,
             connector_factory=_create_llm_connector,
@@ -279,7 +378,6 @@ class StandardRAGPipeline(BaseRAGPipeline):
         integrations_config: IntegrationsConfigTemplate,
     ) -> tuple[LmStudioClient | OllamaClient | None, float, str | None, str | None]:
         """Initialise chat inference according to the configured provider."""
-
         enabled = getattr(inference_config, "enable_remote_services", True)
         if not enabled:
             return None, 0.0, None, None
@@ -435,7 +533,12 @@ class StandardRAGPipeline(BaseRAGPipeline):
             configured_final_top_k if configured_final_top_k else text_top_k,
         )
 
-        search_limit = max(candidate_top_k, text_top_k, rerank_limit)
+        chunk_limit = _to_positive_int(
+            getattr(retrieval_config, "chunk_limit", self._retrieval_chunk_limit),
+            self._retrieval_chunk_limit,
+        )
+
+        search_limit = max(candidate_top_k, text_top_k, rerank_limit, chunk_limit)
         raw_results = self.retriever.search(
             question,
             top_k=search_limit,
@@ -558,7 +661,6 @@ class StandardRAGPipeline(BaseRAGPipeline):
 
     def close(self) -> None:
         """Release resources held by the pipeline components."""
-
         if getattr(self, "_closed", False):
             return
 
@@ -666,7 +768,6 @@ def create_standard_pipeline(
     attach_reranker: bool = True,
 ) -> StandardRAGPipeline:
     """Build a :class:`StandardRAGPipeline` with normalised configuration."""
-
     resolved_config = RAGConfig.ensure(config)
     pipeline = StandardRAGPipeline(resolved_config)
     if not attach_reranker:
@@ -681,7 +782,6 @@ def ingest_documents(
     document_name: str | None = None,
 ) -> ProcessingResult:
     """Ingest ``documents_dir`` and surface failures via ``RuntimeError``."""
-
     success = pipeline.ingest_documents(
         str(documents_dir),
         document_name=document_name,

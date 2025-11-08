@@ -174,6 +174,8 @@ IMAGE_RESOLUTION_SCALE = float(REPOSITORY_ENV["image_resolution_scale"])
 LLM_OCR_URL = REPOSITORY_ENV["llm_ocr_url"] or ""
 PARSE_RESULTS_PATH = REPOSITORY_ENV["parse_results_path"]
 PAPERS_STORAGE_PATH = REPOSITORY_ENV["papers_storage_path"]
+VISION_EMBEDDING_MODOEL = 'openai/clip-vit-base-patch32'
+TEXT_EMBEDDING_MODOEL = 'Qwen/Qwen3-Embedding-0.6B'
 
 BOS, EOS = "<|begin_of_text|>", "<|end_of_text|>"
 SOH, EOH = "<|start_header_id|>", "<|end_header_id|>\n\n"

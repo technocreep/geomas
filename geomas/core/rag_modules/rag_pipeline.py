@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -19,6 +20,7 @@ from geomas.core.rag_modules.database.chroma_db import (
     ChromaDatabaseClient,
     ChromaDatabaseStore,
     DatabaseRagPipeline,
+    PartitionedChromaDatabaseStore,
 )
 from geomas.core.rag_modules.database.chroma_db import Embeddings, ProcessingResult
 from geomas.core.rag_modules.parser.rag_parser import DocumentParser
@@ -207,7 +209,14 @@ class StandardRAGPipeline(BaseRAGPipeline):
         collection_name = database_config.collection_name or "geomas_text_documents"
         store_config = self.config_template.vector_store
         shared_embedding = self._initialise_embedding(self.config_template.retrieval)
-        self.store: ChromaDatabaseStore = self._initialise_store(
+        self.store: ChromaDatabaseStore | PartitionedChromaDatabaseStore
+        self.global_store: ChromaDatabaseStore
+        self.local_store: ChromaDatabaseStore | None
+        (
+            self.store,
+            self.global_store,
+            self.local_store,
+        ) = self._initialise_store(
             store_config.to_dict(),
             shared_embedding,
             collection_name=collection_name,
@@ -329,7 +338,11 @@ class StandardRAGPipeline(BaseRAGPipeline):
         embedding: Embeddings | None,
         *,
         collection_name: str,
-    ) -> ChromaDatabaseStore:
+    ) -> tuple[
+        ChromaDatabaseStore | PartitionedChromaDatabaseStore,
+        ChromaDatabaseStore,
+        ChromaDatabaseStore | None,
+    ]:
         """Create a Chroma-backed vector store for ``config``."""
         store_config = dict(config or {})
         store_type = str(store_config.get("type", _SUPPORTED_VECTOR_STORE_TYPE)).lower()
@@ -347,11 +360,47 @@ class StandardRAGPipeline(BaseRAGPipeline):
                     client_kwargs[key] = value
 
         client = ChromaDatabaseClient(**client_kwargs)
-        return ChromaDatabaseStore(
+        global_store = ChromaDatabaseStore(
             client=client,
             collection_name=collection_name,
             embedding=embedding,
         )
+
+        local_store: ChromaDatabaseStore | None = None
+        local_config = store_config.get("local_client")
+        if isinstance(local_config, Mapping) and local_config:
+            local_kwargs: dict[str, Any] = {}
+            for key, value in local_config.items():
+                if key in _SUPPORTED_CLIENT_OPTIONS:
+                    local_kwargs[key] = value
+
+            try:
+                local_client = ChromaDatabaseClient(**local_kwargs)
+            except Exception as exc:
+                logger.warning("Failed to initialise local Chroma client: %s", exc)
+            else:
+                try:
+                    local_store = ChromaDatabaseStore(
+                        client=local_client,
+                        collection_name=collection_name,
+                        embedding=embedding,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to initialise local Chroma store: %s", exc)
+                    try:
+                        local_client.close()
+                    except Exception:
+                        pass
+                    local_store = None
+
+        if local_store is not None:
+            aggregate = PartitionedChromaDatabaseStore(
+                global_store=global_store,
+                local_store=local_store,
+            )
+            return aggregate, global_store, local_store
+
+        return global_store, global_store, None
 
     def _initialise_reranker(
         self, ranking_config: RankingConfigTemplate
@@ -486,10 +535,13 @@ class StandardRAGPipeline(BaseRAGPipeline):
         return client, temperature, system_prompt, provider_label
 
     def ingest_documents(self, documents_path: str, **kwargs: Any) -> bool:
+        namespace_value = kwargs.pop("namespace", "global")
+        namespace = str(namespace_value) if namespace_value is not None else "global"
         try:
             result = self.database_pipeline.process(
                 documents_path,
                 document_name=kwargs.get("document_name"),
+                namespace=namespace,
             )
         except FileNotFoundError:
             raise
@@ -673,6 +725,10 @@ class StandardRAGPipeline(BaseRAGPipeline):
                 logger.debug("Failed to close database store: %s", exc)
             finally:
                 self.store = None
+                if hasattr(self, "global_store"):
+                    self.global_store = None
+                if hasattr(self, "local_store"):
+                    self.local_store = None
 
         if getattr(self, "retriever", None) is not None:
             self.retriever = None
@@ -780,12 +836,40 @@ def ingest_documents(
     documents_dir: Path | str,
     *,
     document_name: str | None = None,
+    namespace: str = "global",
 ) -> ProcessingResult:
-    """Ingest ``documents_dir`` and surface failures via ``RuntimeError``."""
-    success = pipeline.ingest_documents(
-        str(documents_dir),
-        document_name=document_name,
-    )
+    """Ingest ``documents_dir`` and surface failures via ``RuntimeError``.
+
+    Args:
+        pipeline: Active :class:`StandardRAGPipeline` instance.
+        documents_dir: Filesystem location with artefacts ready for ingestion.
+        document_name: Optional label forwarded to the ingestion adapters.
+        namespace: Target namespace for the ingestion batch.
+    """
+    ingest_callable = getattr(pipeline, "ingest_documents")
+    accepts_namespace = False
+    try:
+        signature = inspect.signature(ingest_callable)
+    except (TypeError, ValueError):
+        signature = None
+
+    if signature is not None:
+        for parameter in signature.parameters.values():
+            if parameter.name == "namespace":
+                accepts_namespace = True
+                break
+
+    if accepts_namespace:
+        success = ingest_callable(
+            str(documents_dir),
+            document_name=document_name,
+            namespace=namespace,
+        )
+    else:
+        success = ingest_callable(
+            str(documents_dir),
+            document_name=document_name,
+        )
     result = pipeline.last_ingest_result or ProcessingResult(success=bool(success))
     return result
 

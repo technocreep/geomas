@@ -17,6 +17,14 @@ from geomas.core.repository.rag_repository import (
 logger = logging.getLogger(__name__)
 
 
+_OLLAMA_EXPORTS = {
+    "OllamaSettings",
+    "build_ollama_rag_config",
+    "load_ollama_settings",
+    "run_ollama_workflow",
+}
+
+
 class RagApi:
     """High-level façade that orchestrates the standard GeoMAS RAG pipeline."""
     def __init__(
@@ -38,7 +46,6 @@ class RagApi:
         setup calls. All public interactions are guarded by a re-entrant lock to
         avoid state races while reconfiguring the pipeline.
         """
-
         self._state_lock = RLock()
         self.is_initialized = False
         self.config = self._build_config(overrides=config, config_path=config_path)
@@ -125,13 +132,21 @@ class RagApi:
         documents_path: Path | str,
         *,
         document_name: str | None = None,
+        namespace: str = "global",
     ) -> ProcessingResult:
-        """Ingest ``documents_path`` through the standard pipeline helper."""
+        """Ingest ``documents_path`` through the standard pipeline helper.
+
+        Args:
+            documents_path: Location of the artefacts to ingest.
+            document_name: Optional metadata override applied during ingestion.
+            namespace: Target namespace ("global" or "local").
+        """
         pipeline = self._require_pipeline()
         result = rag_pipeline.ingest_documents(
             pipeline,
             Path(documents_path),
             document_name=document_name,
+            namespace=namespace,
         )
         if result.success:
             self.is_initialized = True
@@ -153,7 +168,7 @@ class RagApi:
 
             if documents_path:
                 logger.info("Starting ingestion from %s", documents_path)
-                result = self._ingest_path(documents_path)
+                result = self._ingest_path(documents_path, namespace="global")
                 if not result.success:
                     logger.error("Failed to ingest documents from %s", documents_path)
                     return False
@@ -219,7 +234,7 @@ class RagApi:
 
         with self._state_lock:
             logger.info("Ingesting documents from %s", path)
-            result = self._ingest_path(path)
+            result = self._ingest_path(path, namespace="local")
             if not result.success:
                 logger.error("Ingestion pipeline reported failure for %s", path)
                 return False
@@ -353,5 +368,15 @@ class RagApi:
                 "components": pipeline_details,
                 "last_ingestion": ingestion_snapshot,
             }
+
+
+def __getattr__(name: str) -> object:
+    """Lazily expose optional Ollama helpers without forcing imports."""
+
+    if name in _OLLAMA_EXPORTS:
+        from geomas.core.inference import ollama_client as _ollama_client
+
+        return getattr(_ollama_client, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

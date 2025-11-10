@@ -9,6 +9,7 @@ from typing import Any, Dict, Mapping, MutableMapping, Type, TypeVar
 
 import yaml
 
+from geomas.core.rag_modules.steps.retriever import DEFAULT_SIMILARITY_THRESHOLD
 from geomas.core.repository.constant_repository import SUMMARY_LLM_URL
 from geomas.core.repository.parsing_repository import ChunkingParamsConfig
 
@@ -90,13 +91,17 @@ class DatabaseConfigTemplate:
     persistent_path: str = field(
         default_factory=lambda: str(Path.home() / ".cache" / "geomas" / "chroma")
     )
+    local_collection_name: str | None = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "collection_name": self.collection_name,
             "client_mode": self.client_mode,
             "persistent_path": self.persistent_path,
         }
+        if self.local_collection_name:
+            data["local_collection_name"] = self.local_collection_name
+        return data
 
 
 @dataclass(slots=True)
@@ -105,12 +110,16 @@ class VectorStoreConfigTemplate:
 
     type: str = "chroma"
     client: Dict[str, Any] = field(default_factory=dict)
+    local_client: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "type": self.type,
             "client": dict(self.client),
         }
+        if self.local_client:
+            data["local_client"] = dict(self.local_client)
+        return data
 
 
 @dataclass(slots=True)
@@ -122,12 +131,16 @@ class RetrievalConfigTemplate:
     embedding_model_name: str | None = "all-MiniLM-L6-v2"
     final_top_k: int | None = None
     text_top_k: int | None = None
+    chunk_limit: int = 3
+    score_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             "top_k": self.top_k,
             "filters": dict(self.filters),
             "embedding_model_name": self.embedding_model_name,
+            "chunk_limit": self.chunk_limit,
+            "score_threshold": self.score_threshold,
         }
         if self.final_top_k is not None:
             data["final_top_k"] = self.final_top_k

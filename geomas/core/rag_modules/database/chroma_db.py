@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -16,9 +17,77 @@ from geomas.core.rag_modules.database.database_utils import ChromaDatabaseClient
 
 logger = logging.getLogger(__name__)
 
+
+def _distance_to_similarity(distance: float) -> float:
+    """Convert a distance score into a similarity where higher is better."""
+    if not math.isfinite(distance):
+        return 0.0
+    safe_distance = max(distance, 0.0)
+    return 1.0 / (1.0 + safe_distance)
+
+
+def _extract_scores_from_payload(
+    raw_results: Mapping[str, object], expected: int
+) -> list[float]:
+    """Return similarity scores derived from a Chroma payload."""
+    for key in ("similarities", "distances"):
+        values = raw_results.get(key)
+        if not isinstance(values, Sequence) or not values:
+            continue
+
+        primary = values[0] if isinstance(values[0], Sequence) else values
+        try:
+            scores = [float(item) for item in primary][:expected]
+        except (TypeError, ValueError):
+            continue
+
+        if len(scores) != expected:
+            continue
+
+        if key == "distances":
+            return [_distance_to_similarity(score) for score in scores]
+        return scores
+
+    return [float("nan")] * expected
+
+
+def _normalise_scope_values(value: object) -> tuple[list[str], list[str]]:
+    """Parse scope filter values into recognised and unknown candidates."""
+    recognised: list[str] = []
+    unknown: list[str] = []
+
+    def _register(candidate: object) -> None:
+        if not isinstance(candidate, str):
+            unknown.append(repr(candidate))
+            return
+        scope_label = candidate.strip().lower()
+        if not scope_label:
+            unknown.append(repr(candidate))
+            return
+        if scope_label in {"global", "local"}:
+            if scope_label not in recognised:
+                recognised.append(scope_label)
+        else:
+            unknown.append(repr(candidate))
+
+    if isinstance(value, Mapping):
+        in_clause = value.get("$in")
+        if isinstance(in_clause, Sequence):
+            for entry in in_clause:
+                _register(entry)
+        elif value:
+            for entry in value.values():
+                _register(entry)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for entry in value:
+            _register(entry)
+    else:
+        _register(value)
+
+    return recognised, unknown
+
 class ChromaDatabaseStore:
     """Persist and query document artefacts stored in ChromaDB."""
-
     _MAX_INSERT_BATCH_SIZE = 5_461
 
     def __init__(
@@ -40,7 +109,6 @@ class ChromaDatabaseStore:
 
     def close(self) -> None:
         """Close the underlying client and release cached connectors."""
-
         if getattr(self, "_closed", False):
             return
 
@@ -58,8 +126,16 @@ class ChromaDatabaseStore:
 
         self.collection = None
 
-    def add_documents(self, documents: Sequence[Document], *, batch_size: int = 32) -> bool:
+    def add_documents(
+        self,
+        documents: Sequence[Document],
+        *,
+        batch_size: int = 32,
+        namespace: str | None = None,
+    ) -> bool:
         """Persist text documents in ChromaDB."""
+
+        _ = namespace  # Namespace is ignored for single-store deployments.
 
         if not documents:
             logger.info("No documents received for ingestion into ChromaDB")
@@ -170,6 +246,290 @@ class ChromaDatabaseStore:
             )
             return
 
+    def _ensure_collections_ready(self) -> None:
+        """Ensure the backing collection exists."""
+        client = getattr(self, "client", None)
+        name = getattr(self, "collection_name", None)
+        if client is None or name is None:
+            return
+
+        try:
+            self.collection = client.ensure_collection(name)
+        except Exception as exc:
+            logger.warning("Failed to ensure Chroma collection '%s': %s", name, exc)
+
+
+@dataclass(slots=True)
+class _SearchEntry:
+    """Internal helper representing a scored document."""
+    scope: str
+    identifier: str
+    document: str
+    metadata: dict[str, object]
+    similarity: float
+    distance: float | None = None
+
+
+class PartitionedChromaDatabaseStore:
+    """Aggregate store coordinating global and optional local Chroma instances."""
+    def __init__(
+        self,
+        *,
+        global_store: ChromaDatabaseStore,
+        local_store: ChromaDatabaseStore | None = None,
+    ) -> None:
+        if global_store is None:
+            raise ValueError("global_store must be provided")
+
+        self.global_store = global_store
+        self.local_store = local_store
+        self.client = getattr(global_store, "client", None)
+        self.local_client = getattr(local_store, "client", None) if local_store else None
+        self.collection_name = getattr(global_store, "collection_name", None)
+        self.collection = self.client.ensure_collection(self.collection_name)
+        self.embedding = getattr(global_store, "embedding", None)
+
+        self._closed = False
+
+        self._ensure_collections_ready()
+
+    def close(self) -> None:
+        """Close both backing stores and release their resources."""
+        if getattr(self, "_closed", False):
+            return
+
+        self._closed = True
+
+        for store in (self.global_store, self.local_store):
+            if store is None:
+                continue
+            try:
+                store.close()
+            except Exception as exc:
+                logger.debug("Failed to close %s store: %s", store.collection_name, exc)
+
+        self.global_store = None
+        self.local_store = None
+        self.client = None
+        self.local_client = None
+        self.collection_name = None
+        self.embedding = None
+
+    def ensure_collections(self) -> None:
+        """Ensure all managed collections exist."""
+        for store in (self.global_store, self.local_store):
+            if store is None:
+                continue
+            store._ensure_collections_ready()
+
+    def _ensure_collections_ready(self) -> None:
+        self.ensure_collections()
+
+    def add_documents(
+        self,
+        documents: Sequence[Document],
+        *,
+        batch_size: int = 32,
+        namespace: str | None = None,
+    ) -> bool:
+        """Delegate ingestion to the appropriate backing store."""
+        store = self._select_store(namespace)
+        return store.add_documents(documents, batch_size=batch_size)
+
+    def search(
+        self,
+        query: str,
+        *,
+        collection_type: str = "text",
+        top_k: int = 5,
+        filters: Mapping[str, object] | None = None,
+    ) -> dict:
+        """Query all relevant stores and merge their responses."""
+        if collection_type.lower() != "text":
+            raise ValueError(f"Unknown collection type: {collection_type}")
+
+        scopes, base_filters = self._prepare_filters(filters)
+        targets = self._resolve_targets(scopes)
+
+        aggregate: list[_SearchEntry] = []
+        for scope_label, store in targets:
+            payload = store.search(
+                query,
+                collection_type=collection_type,
+                top_k=top_k,
+                filters=dict(base_filters) if base_filters is not None else None,
+            )
+            aggregate.extend(self._expand_payload(payload, scope_label))
+
+        if not aggregate:
+            return {
+                "ids": [[]],
+                "documents": [[]],
+                "metadatas": [[]],
+                "similarities": [[]],
+                "distances": [[]],
+            }
+
+        try:
+            limit = max(0, int(top_k))
+        except (TypeError, ValueError):
+            limit = 5
+
+        aggregate.sort(
+            key=lambda entry: (
+                float("-inf") if math.isnan(entry.similarity) else entry.similarity
+            ),
+            reverse=True,
+        )
+        trimmed = aggregate[:limit] if limit else []
+
+        similarities = [entry.similarity for entry in trimmed]
+        distances = [entry.distance if entry.distance is not None else float("nan") for entry in trimmed]
+
+        return {
+            "ids": [[entry.identifier for entry in trimmed]],
+            "documents": [[entry.document for entry in trimmed]],
+            "metadatas": [[entry.metadata for entry in trimmed]],
+            "similarities": [similarities],
+            "distances": [distances],
+        }
+
+    def _prepare_filters(
+        self, filters: Mapping[str, object] | None
+    ) -> tuple[list[str], Mapping[str, object] | None]:
+        if not isinstance(filters, Mapping):
+            return [], None
+
+        base_filters = dict(filters)
+        raw_scope = base_filters.pop("scope", None)
+        if raw_scope is None:
+            return [], base_filters
+
+        scopes, unknown = _normalise_scope_values(raw_scope)
+        if unknown:
+            logger.warning("Ignoring unsupported scope filter values: %s", ", ".join(unknown))
+
+        return scopes, base_filters
+
+    def _resolve_targets(
+        self, scopes: Sequence[str]
+    ) -> list[tuple[str, ChromaDatabaseStore]]:
+        global_store = getattr(self, "global_store", None)
+        local_store = getattr(self, "local_store", None)
+
+        targets: list[tuple[str, ChromaDatabaseStore]] = []
+        request_global = not scopes or "global" in scopes
+        request_local = ("local" in scopes) if scopes else bool(local_store)
+
+        if "local" in scopes and local_store is None:
+            logger.info(
+                "Local scope requested but no local store is configured; falling back to global scope",
+            )
+            request_global = True
+            request_local = False
+
+        if request_global and global_store is not None:
+            targets.append(("global", global_store))
+
+        if request_local and local_store is not None:
+            targets.append(("local", local_store))
+
+        if not targets:
+            if global_store is None and local_store is None:
+                raise RuntimeError("No Chroma stores are available for querying")
+            if global_store is not None:
+                targets.append(("global", global_store))
+
+        return targets
+
+    def _select_store(self, namespace: str | None) -> ChromaDatabaseStore:
+        label = (namespace or "global").strip().lower()
+        local_store = getattr(self, "local_store", None)
+        global_store = getattr(self, "global_store", None)
+
+        if global_store is None:
+            raise RuntimeError("Global store is not available for ingestion")
+
+        if label == "local":
+            if local_store is not None:
+                return local_store
+            logger.info(
+                "Local namespace requested but unavailable; defaulting ingestion to the global store",
+            )
+            return global_store
+
+        if label not in {"", "global"}:
+            logger.warning("Unknown namespace '%s'; defaulting to global store", namespace)
+
+        return global_store
+
+    def _expand_payload(self, payload: Mapping[str, object], scope: str) -> list[_SearchEntry]:
+        if not isinstance(payload, Mapping):
+            return []
+
+        documents_row = self._first_row(payload.get("documents"))
+        metadata_row = self._first_row(payload.get("metadatas"))
+        ids_row = self._first_row(payload.get("ids"))
+        distances_row = self._first_row(payload.get("distances"))
+
+        lengths = [
+            len(documents_row),
+            len(metadata_row) if metadata_row is not None else len(documents_row),
+            len(ids_row),
+        ]
+        expected = min(lengths) if lengths else 0
+        if expected <= 0:
+            return []
+
+        scores = _extract_scores_from_payload(payload, expected)
+
+        distances: list[float | None] = []
+        if distances_row is not None:
+            for index in range(expected):
+                try:
+                    distances.append(float(distances_row[index]))
+                except (TypeError, ValueError, IndexError):
+                    distances.append(float("nan"))
+        else:
+            distances = [float("nan")] * expected
+
+        entries: list[_SearchEntry] = []
+        for index in range(expected):
+            metadata_value = metadata_row[index] if metadata_row and index < len(metadata_row) else {}
+            if isinstance(metadata_value, Mapping):
+                metadata = dict(metadata_value)
+            else:
+                metadata = {}
+            metadata["scope"] = scope
+
+            document_value = documents_row[index] if index < len(documents_row) else ""
+            identifier_value = ids_row[index] if index < len(ids_row) else ""
+            similarity = scores[index] if index < len(scores) else float("nan")
+
+            entries.append(
+                _SearchEntry(
+                    scope=scope,
+                    identifier=str(identifier_value),
+                    document=str(document_value),
+                    metadata=metadata,
+                    similarity=float(similarity),
+                    distance=float(distances[index]) if index < len(distances) else float("nan"),
+                )
+            )
+
+        return entries
+
+    @staticmethod
+    def _first_row(value: object) -> Sequence[object]:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            return []
+        if not value:
+            return []
+        first = value[0]
+        if isinstance(first, Sequence) and not isinstance(first, (str, bytes, bytearray)):
+            return first
+        return value
+
     def search(
         self,
         query: str,
@@ -179,7 +539,6 @@ class ChromaDatabaseStore:
         filters: Mapping[str, object] | None = None,
     ) -> dict:
         """Query a Chroma collection for the given text."""
-
         if collection_type.lower() != "text":
             raise ValueError(f"Unknown collection type: {collection_type}")
 
@@ -205,7 +564,6 @@ class ChromaDatabaseStore:
 @dataclass(slots=True, frozen=True)
 class ProcessingResult:
     """Outcome of a database ingestion attempt."""
-
     success: bool
     documents_ingested: int = 0
     summaries_created: int = 0
@@ -213,7 +571,6 @@ class ProcessingResult:
 
 class DatabaseRagPipeline:
     """Ingest artefacts into the Chroma store using the adapter pipeline."""
-
     def __init__(
         self,
         *,
@@ -242,9 +599,16 @@ class DatabaseRagPipeline:
         *,
         loader_overrides: Mapping[str, object] | None = None,
         document_name: str | None = None,
+        namespace: str = "global",
     ) -> ProcessingResult:
-        """Process ``folder_path`` and persist extracted documents."""
+        """Process ``folder_path`` and persist extracted documents.
 
+        Args:
+            folder_path: Root directory containing artefacts to ingest.
+            loader_overrides: Optional adapter overrides applied to the data loader.
+            document_name: Optional explicit document label for metadata enrichment.
+            namespace: Target store namespace (``"global"`` or ``"local"``).
+        """
         path = Path(folder_path).expanduser().resolve()
         if not path.exists():
             raise FileNotFoundError(f"Provided folder does not exist: {path}")
@@ -265,7 +629,7 @@ class DatabaseRagPipeline:
             return ProcessingResult(success=False)
 
         try:
-            stored = self.store.add_documents(documents)
+            stored = self.store.add_documents(documents, namespace=namespace)
         except Exception as exc:
             logger.exception("Failed to store documents in ChromaDB: %s", exc)
             return ProcessingResult(success=False)
@@ -305,7 +669,6 @@ class DatabaseRagPipeline:
         filters: Mapping[str, object] | None = None,
     ) -> dict:
         """Return a list of candidate sources for ``query`` based on text chunks."""
-
         limit = self._resolve_limit(top_k)
         raw_docs = self.store.search(
             query,
@@ -344,7 +707,6 @@ class DatabaseRagPipeline:
         text_top_k: int | None = None,
     ) -> tuple[list[tuple[str, str, dict, float]], dict]:
         """Retrieve text context for ``query`` using previously ingested chunks."""
-
         candidate_sources = []
         if relevant_papers:
             candidate_sources = list(
@@ -357,6 +719,15 @@ class DatabaseRagPipeline:
 
         if isinstance(filters, Mapping) and filters:
             filter_spec.update(dict(filters))
+
+        scope_filter = filter_spec.get("scope")
+        if scope_filter is not None:
+            _, unknown_scopes = _normalise_scope_values(scope_filter)
+            if unknown_scopes:
+                logger.warning(
+                    "retrieve_context received unsupported scope filters: %s",
+                    ", ".join(unknown_scopes),
+                )
 
         active_filter = filter_spec or None
         text_limit = self._resolve_limit(text_top_k)
@@ -404,17 +775,10 @@ class DatabaseRagPipeline:
         return scored_docs
 
     @staticmethod
-    def _extract_scores(raw_results: Mapping[str, object], expected: int) -> list[float]:
-        for key in ("distances", "similarities"):
-            values = raw_results.get(key)
-            if not isinstance(values, Sequence) or not values:
-                continue
-            primary = values[0] if isinstance(values[0], Sequence) else values
-            try:
-                scores = [float(item) for item in primary][:expected]
-            except (TypeError, ValueError):
-                continue
-            if len(scores) == expected:
-                return scores
-        return [float("nan")] * expected
+    def _distance_to_similarity(distance: float) -> float:
+        return _distance_to_similarity(distance)
+
+    @classmethod
+    def _extract_scores(cls, raw_results: Mapping[str, object], expected: int) -> list[float]:
+        return _extract_scores_from_payload(raw_results, expected)
 

@@ -7,9 +7,8 @@ from typing import Optional, Sequence
 import logging
 import os
 from pathlib import Path
-
+from chromadb import Documents, EmbeddingFunction
 import chromadb
-from chromadb import EmbeddingFunction
 from chromadb.api.models import Collection
 from pydantic import BaseModel, Field
 

@@ -22,7 +22,6 @@ PARSE_RESULTS_PATH = os.path.join(
 
 class TextChunker:
     """Chunk raw text into LangChain documents while preserving legacy metadata."""
-
     _SUPPORTED_TYPES: frozenset[str] = frozenset({"html", "markdown"})
 
     def __init__(self, chunking_params: Mapping[str, Any] | None = None):
@@ -57,7 +56,6 @@ class TextChunker:
         ``markdown`` overrides.  This helper merges both representations into a
         stable ``{"defaults": ..., "html": ..., "markdown": ...}`` structure.
         """
-
         if not isinstance(params, Mapping):
             return {"defaults": {}, "html": {}, "markdown": {}}
 

@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import math
 import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
@@ -12,15 +15,16 @@ from langchain_core.documents import Document
 from geomas.core.rag_modules.database.chroma_db import ChromaDatabaseStore
 
 
+DEFAULT_SIMILARITY_THRESHOLD = 0.5
+
+
 def _is_nonstring_sequence(value: object) -> bool:
     """Return ``True`` when ``value`` behaves like a sequence of results."""
-
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
 
 
 def _extract_ids_row(payload: Mapping[str, object]) -> Sequence[object] | None:
     """Return the first ids row when the response payload matches expectations."""
-
     ids_field = payload.get("ids")
     if not _is_nonstring_sequence(ids_field):
         return None
@@ -35,7 +39,6 @@ def _extract_ids_row(payload: Mapping[str, object]) -> Sequence[object] | None:
 
 def _unique_indices(ids_row: Sequence[object], limit: int) -> list[int]:
     """Return indices representing the first unique ids up to ``limit``."""
-
     if limit <= 0:
         return []
 
@@ -54,7 +57,6 @@ def _unique_indices(ids_row: Sequence[object], limit: int) -> list[int]:
 
 def _coerce_row(row: Sequence[object], indices: Sequence[int]) -> Sequence[object]:
     """Project ``row`` onto ``indices`` while preserving its container type."""
-
     selected: list[object] = []
     for index in indices:
         if index < len(row):
@@ -66,7 +68,7 @@ def _coerce_row(row: Sequence[object], indices: Sequence[int]) -> Sequence[objec
         return tuple(selected)
 
     try:
-        return type(row)(selected)  # type: ignore[call-arg]
+        return type(row)(selected)
     except Exception:
         return selected
 
@@ -77,7 +79,6 @@ def _project_payload(
     indices: Sequence[int],
 ) -> Mapping[str, object]:
     """Return a payload projected to ``indices`` when deduplication is required."""
-
     # Preserve the original container type when the payload is a mutable mapping.
     try:
         projected_payload: Dict[str, object] = dict(payload)
@@ -109,7 +110,6 @@ def _project_payload(
 
 def _deduplicate_payload(payload: Mapping[str, object], top_k: int) -> Mapping[str, object]:
     """Remove duplicate ids from ``payload`` while respecting ``top_k``."""
-
     ids_row = _extract_ids_row(payload)
     if ids_row is None:
         return payload
@@ -125,6 +125,110 @@ def _deduplicate_payload(payload: Mapping[str, object], top_k: int) -> Mapping[s
         return payload
 
     return _project_payload(payload, indices=indices)
+
+
+def _first_row(payload: Mapping[str, object], key: str) -> Sequence[object] | None:
+    """Return the first row stored under ``key`` when shaped as a table."""
+    values = payload.get(key)
+    if not _is_nonstring_sequence(values) or not values:
+        return None
+
+    first = values[0]
+    if _is_nonstring_sequence(first):
+        return first
+    if _is_nonstring_sequence(values):
+        return values
+    return None
+
+
+def _coerce_floats(row: Sequence[object]) -> list[float]:
+    """Convert ``row`` entries into floats while preserving order."""
+    coerced: list[float] = []
+    for value in row:
+        try:
+            coerced.append(float(value))
+        except (TypeError, ValueError):
+            coerced.append(float("nan"))
+    return coerced
+
+
+def _distance_to_similarity(distance: float) -> float:
+    """Convert a distance score into a similarity where higher is better."""
+    if not math.isfinite(distance):
+        return 0.0
+    safe_distance = max(distance, 0.0)
+    return 1.0 / (1.0 + safe_distance)
+
+
+def _derive_similarity_row(payload: Mapping[str, object]) -> list[float]:
+    """Return similarity scores derived from ``payload``."""
+    similarities_row = _first_row(payload, "similarities")
+    if similarities_row is not None:
+        return _coerce_floats(similarities_row)
+
+    distances_row = _first_row(payload, "distances")
+    if distances_row is not None:
+        return [_distance_to_similarity(value) for value in _coerce_floats(distances_row)]
+
+    return []
+
+
+def prepare_retrieval_results(
+    payload: Mapping[str, object],
+    *,
+    top_k: int,
+    chunk_limit: int,
+    score_threshold: float,
+) -> Mapping[str, object]:
+    """Normalise ``payload`` and filter candidates by similarity."""
+
+    deduplicated = _deduplicate_payload(payload, top_k)
+    if not isinstance(deduplicated, Mapping):
+        return deduplicated
+
+    similarities = _derive_similarity_row(deduplicated)
+    if not similarities:
+        candidate_row = _first_row(deduplicated, "documents") or _first_row(
+            deduplicated, "ids"
+        )
+        candidate_count = len(candidate_row) if candidate_row else 0
+        if candidate_count:
+            similarities = [0.0] * candidate_count
+
+    try:
+        normalised: Dict[str, object] = dict(deduplicated)
+    except Exception:
+        normalised = {key: value for key, value in deduplicated.items()}
+
+    normalised["similarities"] = [list(similarities)]
+
+    indices = _select_candidate_indices(similarities, chunk_limit, score_threshold)
+    if not indices:
+        return normalised
+
+    return _project_payload(normalised, indices=indices)
+
+
+def _select_candidate_indices(
+    similarities: Sequence[float], limit: int, threshold: float
+) -> list[int]:
+    """Return indices meeting ``threshold`` up to ``limit`` with graceful fallback."""
+    if not similarities:
+        return []
+
+    hard_limit = max(1, int(limit))
+    selected: list[int] = []
+    for index, score in enumerate(similarities):
+        if len(selected) >= hard_limit:
+            break
+        if score >= threshold:
+            selected.append(index)
+
+    if not selected:
+        fallback = min(hard_limit, len(similarities))
+        selected.extend(range(fallback))
+
+    return selected[:hard_limit]
 
 
 @dataclass
@@ -182,10 +286,30 @@ DocRetriever = Retriever
 
 
 class BasicRetriever:
-    """Perform similarity search over the configured :class:`ChromaDatabaseStore`."""
+    """Perform similarity search over the configured :class:`ChromaDatabaseStore`.
 
-    def __init__(self, store: ChromaDatabaseStore) -> None:
+    The retriever enforces similarity-based filtering using
+    ``DEFAULT_SIMILARITY_THRESHOLD`` unless a caller supplies an override.
+    """
+    def __init__(
+        self,
+        store: ChromaDatabaseStore,
+        *,
+        chunk_limit: int = 3,
+        score_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    ) -> None:
         self.store = store
+        try:
+            parsed_limit = int(chunk_limit)
+        except (TypeError, ValueError):
+            parsed_limit = 3
+        self.chunk_limit = max(1, parsed_limit)
+
+        try:
+            parsed_threshold = float(score_threshold)
+        except (TypeError, ValueError):
+            parsed_threshold = DEFAULT_SIMILARITY_THRESHOLD
+        self.score_threshold = parsed_threshold
 
     def search(
         self,
@@ -194,10 +318,17 @@ class BasicRetriever:
         top_k: int,
         filters: Mapping[str, object] | None = None,
     ) -> Mapping[str, object]:
-        """Proxy ``query`` to the underlying store and deduplicate the results."""
-
+        """Proxy ``query`` to the underlying store and apply similarity filtering."""
         payload = self.store.search(query, top_k=top_k, filters=filters)
-        return _deduplicate_payload(payload, top_k)
+        if not isinstance(payload, Mapping):
+            return payload
+
+        return prepare_retrieval_results(
+            payload,
+            top_k=top_k,
+            chunk_limit=self.chunk_limit,
+            score_threshold=self.score_threshold,
+        )
 
 
 class RetrievingPipeline:

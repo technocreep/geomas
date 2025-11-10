@@ -4,7 +4,9 @@ import logging
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Any, Callable, List, Mapping, Sequence, Tuple, TYPE_CHECKING
+from typing import Any, Callable, List, Mapping, Sequence, Tuple
+
+from chromadb.utils import embedding_functions as chroma_embeddings
 
 from langchain_core.documents import Document
 from langchain_core.language_models import LLM
@@ -20,21 +22,7 @@ def _load_embedding_function(
     embedding_function_kwargs: Mapping[str, Any] | None = None,
 ) -> Any:
     """Resolve a Chroma embedding function by name."""
-
-    try:
-        from chromadb.utils import embedding_functions as chroma_embeddings
-    except ImportError as exc:  # pragma: no cover - depends on optional chromadb
-        message = "Chroma dependencies are not installed"
-        raise ImportError(message) from exc
-
-    try:
-        embedding_cls = getattr(chroma_embeddings, embedding_function_name)
-    except AttributeError as exc:
-        message = (
-            f"Embedding function '{embedding_function_name}' is not available in"
-            " chromadb.utils.embedding_functions"
-        )
-        raise ImportError(message) from exc
+    embedding_cls = getattr(chroma_embeddings, embedding_function_name)
 
     initialisation_kwargs: dict[str, Any] = dict(embedding_function_kwargs or {})
     if embedding_model_name is not None and "model_name" not in initialisation_kwargs:
@@ -46,7 +34,6 @@ def _load_embedding_function(
 @dataclass(slots=True)
 class LengthReranker:
     """Reranks documents by descending character length."""
-
     def rerank(self, documents: Sequence[Document]) -> list[Document]:
         if not documents:
             return []
@@ -60,7 +47,6 @@ class LengthReranker:
 
 class ChromaReranker:
     """Rerank documents using Chroma-compatible embedding functions."""
-
     _DEFAULT_FUNCTION = "SentenceTransformerEmbeddingFunction"
 
     def __init__(

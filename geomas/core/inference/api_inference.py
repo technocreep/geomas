@@ -6,7 +6,7 @@ import os
 class APIConnector:
     VLM_MODELS = {"llava", "llava-phi3", "qwen3-vl:2b"}
 
-    def __init__(self, model_name: str, model_params: dict = None, base_url: str = "http://localhost:11434"):
+    def __init__(self, model_name: str, model_params: dict = None, base_url: str = "http://localhost:11434/api/chat"):
         self.model_name = model_name
         self.model_params = model_params or {}
         self.base_url = base_url.rstrip("/")
@@ -57,7 +57,7 @@ class APIConnector:
             }
             try:
                 resp = requests.post(
-                    f"{self.base_url}/api/chat",
+                    f"{self.base_url}",
                     json=payload,
                     timeout=1200
                 )

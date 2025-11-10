@@ -142,7 +142,6 @@ class VisualDataProcessor:
                 if len(description)!=0:
                     with open(json_path, "w", encoding="utf-8") as f:
                         json.dump(json_doc, f, ensure_ascii=False, indent=2)
-                        logger.info(f"Successfully processed: {img_path.name}")
 
                 documents.append(doc)
                 logger.info(f"Successfully processed: {img_path.name}")

@@ -400,7 +400,7 @@ def process_visual_docs_with_embedding(
             collection_name=f"{collection_name}_description",
             embeddings=documents['description_embedding']
         )
-        logger.info(f"✅ Successfully stored {len(documents)} visual document descriptions!")
+        logger.info(f"✅ Successfully stored {len(documents['metadata'])} visual document descriptions!")
             
     except Exception as e:
         logger.error(f"Processing failed: {e}")

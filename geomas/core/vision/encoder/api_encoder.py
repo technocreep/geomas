@@ -6,6 +6,8 @@ from tqdm import tqdm
 from math import ceil
 import numpy
 from geomas.core.vision.encoder.encoder import Encoder
+import logging
+logger = logging.getLogger(__name__)
 
 
 class ApiEncoder(Encoder):
@@ -26,10 +28,7 @@ class ApiEncoder(Encoder):
         while attempt < self.max_retries:
             try:
                 response = requests.post(
-                    self.model_name,
-                    headers=self.headers,
-                    json={"input": texts},
-                    verify=False,
+                    self.model_name, headers=self.headers, json={"input": texts}
                 )
                 response.raise_for_status()
                 embeddings = [
@@ -39,16 +38,16 @@ class ApiEncoder(Encoder):
 
             except requests.exceptions.RequestException as e:
                 attempt += 1
-                print(
+                logger.error(
                     f"Error during API request (Attempt {attempt}/{self.max_retries}): {e}"
                 )
                 if attempt == self.max_retries:
-                    print("Max retries reached. Returning empty tensor.")
-                    return torch.Tensor()
+                    logger.error("Max retries reached. Returning empty tensor.")
+                    return numpy.array([])
                 time.sleep(self.retry_delay)
             except (KeyError, TypeError, ValueError) as e:
-                print(f"Error processing API response: {e}")
-                return torch.Tensor()
+                logger.error(f"Error processing API response: {e}")
+                return numpy.array([])
 
     def encode(self, texts: list[str], batch_size: int = 32):
         texts = [text[: self.max_length] for text in texts]
@@ -57,5 +56,7 @@ class ApiEncoder(Encoder):
         for batch_idx in tqdm(range(num_batches)):
             batch = texts[batch_idx * batch_size : (batch_idx + 1) * batch_size]
             claims_embeddings = self.get_embedding(batch)
-            all_embeddings.extend(claims_embeddings)
-        return all_embeddings
+            all_embeddings.append(claims_embeddings)
+        embeddings = numpy.vstack(all_embeddings)
+        return embeddings
+    

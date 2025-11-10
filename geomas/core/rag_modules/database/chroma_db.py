@@ -609,11 +609,11 @@ class PartitionedChromaDatabaseStore:
         return store.add_documents(documents, batch_size=batch_size, namespace=namespace)
 
     def store_visual_documents(
-            self,
-            documents: list[Document],
-            collection_name: str,
-            embeddings: np.ndarray=None
-            ) -> None:
+        self,
+        documents: list[Document],
+        collection_name: str,
+        embeddings: np.ndarray = None,
+    ) -> None:
         """
         Store visual document descriptions in a ChromaDB collection.
 
@@ -642,24 +642,30 @@ class PartitionedChromaDatabaseStore:
         logger.info(f"Storing descriptions in ChromaDB collection: {collection_name}")
         # Get or create collection for visual documents
         visual_collection = self.client.get_or_create_chroma_collection(
-            collection=collection_name,
-            embedding_function=None
+            collection=collection_name, embedding_function=None
         )
         # Prepare documents and metadata
         doc_texts = [doc.page_content for doc in documents]
         doc_metadatas = [{"type": "visual", **doc.metadata} for doc in documents]
 
-
         # Store in ChromaDB
-        visual_collection.add(
-            ids=[str(uuid.uuid4()) for _ in range(len(documents))],
-            documents=doc_texts,
-            embeddings=embeddings,
-            metadatas=doc_metadatas
-        )
+        try:
+            visual_collection.add(
+                ids=[str(uuid.uuid4()) for _ in range(len(documents))],
+                documents=doc_texts,
+                embeddings=embeddings,
+                metadatas=doc_metadatas,
+            )
+            logger.info(
+                f"Stored {len(documents)} documents in collection '{collection_name}'"
+            )
 
-        logger.info(f"Stored {len(documents)} documents in collection '{collection_name}'")
-        
+        except Exception as e:
+            logger.error(
+                f"Failed to store documents in ChromaDB collection '{collection_name}': {e}"
+            )
+            return
+
     def search(
         self,
         query: str,

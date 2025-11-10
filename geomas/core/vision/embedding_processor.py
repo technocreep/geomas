@@ -41,17 +41,17 @@ class MultimodalEmbeddingProcessor:
             "metadata": metadata
         }
     
-    def _extract_structural_elements(self, image_path: str) -> List[Dict]:
-        """Выделение структурных элементов карты"""
-        # Детекция контуров, разломов, зон минерализации
-        # Используем традиционное CV + ML
-        import cv2
-        contours = cv2.findContours(...)
-        faults = self._detect_faults(contours)
-        mineralization_zones = self._detect_mineralization(contours)
+    # def _extract_structural_elements(self, image_path: str) -> List[Dict]:
+    #     """Выделение структурных элементов карты"""
+    #     # Детекция контуров, разломов, зон минерализации
+    #     # Используем традиционное CV + ML
+    #     import cv2
+    #     contours = cv2.findContours(...)
+    #     faults = self._detect_faults(contours)
+    #     mineralization_zones = self._detect_mineralization(contours)
         
-        return {
-            "faults": faults,
-            "mineralization_zones": mineralization_zones,
-            "contours": contours
-        }
+    #     return {
+    #         "faults": faults,
+    #         "mineralization_zones": mineralization_zones,
+    #         "contours": contours
+    #     }

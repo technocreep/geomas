@@ -242,12 +242,34 @@ def build_ollama_rag_config(
     documents_dir: Path | str,
     *,
     cache_dir: Path | str | None = None,
+    local_cache_dir: Path | str | None = None,
     settings: OllamaSettings | None = None,
 ) -> RAGConfig:
-    """Create a :class:`RAGConfig` tuned for the Ollama integration."""
+    """Create a :class:`RAGConfig` tuned for the Ollama integration.
+
+    Args:
+        documents_dir: Directory containing the base document collection.
+        cache_dir: Optional path controlling the persistent Chroma cache used by
+            the primary database client. When omitted the cache resides within
+            ``documents_dir``.
+        local_cache_dir: Optional path enabling a secondary local cache. When
+            provided additional configuration keys are emitted to describe the
+            local collection name and vector-store client path while preserving
+            backwards compatible defaults when the argument is ``None``.
+        settings: Optional :class:`OllamaSettings` instance describing the model
+            connection parameters. When omitted the settings are loaded from the
+            environment.
+
+    Returns:
+        A fully initialised :class:`RAGConfig` instance ready for use with the
+        Ollama workflow helpers.
+    """
     resolved_settings = settings or load_ollama_settings()
     documents_path = Path(documents_dir)
-    persistent_path = Path(cache_dir) if cache_dir is not None else documents_path / ".vector-store"
+    persistent_path = (
+        Path(cache_dir) if cache_dir is not None else documents_path / ".vector-store"
+    )
+    local_persistent_path = Path(local_cache_dir) if local_cache_dir is not None else None
 
     overrides: Dict[str, Any] = {
         "parsing": {"enable_parser": False},
@@ -276,6 +298,16 @@ def build_ollama_rag_config(
         },
     }
 
+    if local_persistent_path is not None:
+        database_overrides = overrides.setdefault("database", {})
+        collection_name = str(database_overrides.get("collection_name", "geomas"))
+        database_overrides["local_collection_name"] = f"{collection_name}_local"
+
+        vector_store_overrides = overrides.setdefault("vector_store", {})
+        vector_store_overrides["local_client"] = {
+            "persistent_path": str(local_persistent_path),
+        }
+
     base_config = RAGConfig.default().to_dict()
     _deep_update(base_config, overrides)
     return RAGConfig.from_mapping(base_config)
@@ -287,9 +319,24 @@ def run_ollama_workflow(
     documents_dir: Path | str,
     uploaded_documents: Sequence[Path | str] | None = None,
     cache_dir: Path | str | None = None,
+    local_cache_dir: Path | str | None = None,
     settings: Mapping[str, object] | OllamaSettings | None = None,
 ) -> Dict[str, Any]:
-    """Execute an Ollama-backed workflow using :class:`RagApi`."""
+    """Execute an Ollama-backed workflow using :class:`RagApi`.
+
+    Args:
+        question: Natural language query forwarded to the workflow.
+        documents_dir: Base directory containing reference documents.
+        uploaded_documents: Optional collection of additional artefacts to
+            ingest before answering the question.
+        cache_dir: Optional remote/persistent cache directory used for the
+            shared vector store.
+        local_cache_dir: Optional path configuring a local vector-store cache.
+            When omitted the workflow matches previous behaviour and only the
+            persistent cache is used.
+        settings: Optional mapping or :class:`OllamaSettings` describing the
+            target Ollama instance.
+    """
     if not question:
         raise ValueError("Question must be a non-empty string")
 
@@ -310,6 +357,7 @@ def run_ollama_workflow(
     config = build_ollama_rag_config(
         documents_path,
         cache_dir=cache_path,
+        local_cache_dir=local_cache_dir,
         settings=resolved_settings,
     )
 

@@ -91,13 +91,17 @@ class DatabaseConfigTemplate:
     persistent_path: str = field(
         default_factory=lambda: str(Path.home() / ".cache" / "geomas" / "chroma")
     )
+    local_collection_name: str | None = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "collection_name": self.collection_name,
             "client_mode": self.client_mode,
             "persistent_path": self.persistent_path,
         }
+        if self.local_collection_name:
+            data["local_collection_name"] = self.local_collection_name
+        return data
 
 
 @dataclass(slots=True)
@@ -106,12 +110,16 @@ class VectorStoreConfigTemplate:
 
     type: str = "chroma"
     client: Dict[str, Any] = field(default_factory=dict)
+    local_client: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "type": self.type,
             "client": dict(self.client),
         }
+        if self.local_client:
+            data["local_client"] = dict(self.local_client)
+        return data
 
 
 @dataclass(slots=True)

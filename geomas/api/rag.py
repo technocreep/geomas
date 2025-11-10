@@ -38,7 +38,6 @@ class RagApi:
         setup calls. All public interactions are guarded by a re-entrant lock to
         avoid state races while reconfiguring the pipeline.
         """
-
         self._state_lock = RLock()
         self.is_initialized = False
         self.config = self._build_config(overrides=config, config_path=config_path)

@@ -107,7 +107,6 @@ PROMPT_RANK_TEMPLATE = """
 <|start_header_id|>assistant<|end_header_id|>
 """
 
-# TODO: remake it for more high accuracy
 PROMPT_PLAN_TEMPLATE = """
 <|begin_of_text|>
 <|start_header_id|>system<|end_header_id|>

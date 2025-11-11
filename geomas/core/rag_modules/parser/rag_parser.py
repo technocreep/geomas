@@ -15,13 +15,15 @@ _log = logging.getLogger(__name__)
 
 class DocumentParser:
 
-    def __init__(self, chunking_params: dict = None, use_llm: bool = False):
+    def __init__(self, chunking_params: dict = None, use_llm: bool = False, use_max_min: bool = False):
         """
         Args:
             chunking_params: Parameters for text chunking
             use_llm: Whether to use LLM for image processing (requires GPU)
+            use_max_min: Whether to use Max-Min semantic chunking algorithm instead of standard chunking
         """
         self.use_llm = use_llm
+        self.use_max_min = use_max_min
         self.vision_llm = None
         
         # Lazy import and initialization - only if LLM is needed
@@ -33,7 +35,12 @@ class DocumentParser:
                 _log.warning(f"Could not initialize LLM connector: {e}")
                 self.use_llm = False
         
-        self.chunking_agent = TextChunker(chunking_params)
+        # Choose chunking algorithm
+        if use_max_min:
+            from geomas.core.rag_modules.steps.max_min_chunking import MaxMinTextChunker
+            self.chunking_agent = MaxMinTextChunker(chunking_params)
+        else:
+            self.chunking_agent = TextChunker(chunking_params)
 
     def _llm_image_to_text(self, current_img, local_img_path, images):
         if not self.use_llm or self.vision_llm is None:

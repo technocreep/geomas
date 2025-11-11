@@ -15,7 +15,12 @@ class TextChunker:
         self.splitter_dict = {'html': HTMLSemanticPreservingSplitter,
                               'markdown': MarkdownTextSplitter,
                               }
-        self.chunking_params = chunking_params if chunking_params is not None else ChunkingParamsConfig.to_dict()
+        if chunking_params is not None:
+            self.chunking_params = chunking_params
+        else:
+            # ChunkingParamsConfig returns (class, params) tuple from __new__
+            _, params = ChunkingParamsConfig()
+            self.chunking_params = params
         pass
 
     def _custom_table_extractor(self, table_tag):

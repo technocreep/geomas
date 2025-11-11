@@ -364,10 +364,16 @@ class ChromaDatabaseStore:
 
 
 class DatabaseRagPipeline:
-    def __init__(self):
+    def __init__(self, use_max_min_chunking: bool = False):
+        """
+        Initialize DatabaseRagPipeline.
+        
+        Args:
+            use_max_min_chunking: Whether to use Max-Min semantic chunking algorithm
+        """
         self.dispatcher = partial(ThreadPoolExecutor, max_workers=2)
         self.store = ChromaDatabaseStore()
-        self.parser = DocumentParser()
+        self.parser = DocumentParser(use_max_min=use_max_min_chunking)
         self.llm_url = SUMMARY_LLM_URL
 
     def _init_llm_model(self):

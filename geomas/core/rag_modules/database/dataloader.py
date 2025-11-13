@@ -48,7 +48,9 @@ def load_documents_to_chroma_db(
 
     if not result.success:
         logger.info("No documents were ingested from '%s'", target_path)
-    else:
+    elif result.documents_ingested > 0:
         logger.info(
             "Ingested %s documents from '%s'", result.documents_ingested, target_path
         )
+    else:
+        logger.info("Skipped ingestion for '%s'; documents unchanged", target_path)

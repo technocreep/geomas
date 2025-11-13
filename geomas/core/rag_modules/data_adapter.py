@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -111,6 +113,8 @@ class DataLoaderAdapter:
         resolved_name = document_name or path.stem
         cleanup_paths: list[Path] = []
 
+        fingerprint, last_modified, size_bytes = self._collect_file_metadata(path)
+
         if suffix in self.JSON_SUFFIXES:
             documents = self._load_json_documents(path)
         elif suffix in self.HTML_SUFFIXES:
@@ -121,8 +125,43 @@ class DataLoaderAdapter:
             logger.info("Skipping unsupported file '%s'", path)
             return [], []
 
-        enriched = self._enrich_metadata(path, resolved_name, documents)
+        enriched = self._enrich_metadata(
+            path,
+            resolved_name,
+            documents,
+            fingerprint=fingerprint,
+            last_modified=last_modified,
+            size_bytes=size_bytes,
+        )
         return enriched, cleanup_paths
+
+    @staticmethod
+    def _collect_file_metadata(path: Path) -> tuple[str | None, str | None, int | None]:
+        fingerprint: str | None = None
+        last_modified: str | None = None
+        size_bytes: int | None = None
+
+        try:
+            stat_result = path.stat()
+        except OSError as exc:
+            logger.warning("Failed to stat '%s' while computing metadata: %s", path, exc)
+        else:
+            size_bytes = int(stat_result.st_size)
+            try:
+                last_modified = datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc).isoformat()
+            except (OverflowError, OSError, ValueError) as exc:
+                logger.warning("Failed to normalise mtime for '%s': %s", path, exc)
+
+        try:
+            hasher = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(65536), b""):
+                    hasher.update(chunk)
+            fingerprint = hasher.hexdigest()
+        except OSError as exc:
+            logger.warning("Failed to fingerprint '%s': %s", path, exc)
+
+        return fingerprint, last_modified, size_bytes
 
     def _load_json_documents(self, path: Path) -> list[Document]:
         try:
@@ -244,6 +283,10 @@ class DataLoaderAdapter:
         source_path: Path,
         document_name: str,
         documents: Sequence[Document],
+        *,
+        fingerprint: str | None = None,
+        last_modified: str | None = None,
+        size_bytes: int | None = None,
     ) -> list[Document]:
         valid_documents = [doc for doc in documents if isinstance(doc, Document)]
         chunk_count = len(valid_documents)
@@ -258,20 +301,22 @@ class DataLoaderAdapter:
             metadata["document_name"] = document_name
             metadata["chunk_index"] = index
             metadata["chunk_count"] = chunk_count
+            if fingerprint:
+                metadata["source_fingerprint"] = fingerprint
+            if last_modified:
+                metadata["source_last_modified"] = last_modified
+            if size_bytes is not None:
+                metadata["source_size_bytes"] = size_bytes
             enriched.append(Document(page_content=document.page_content, metadata=metadata))
         return enriched
 
 
 def format_text_context(
     text_context: Iterable[Sequence[object]],
-    *,
-    limit: int = 3,
 ) -> list[dict[str, object]]:
     """Summarise raw ``text_context`` entries for presentation layers."""
     formatted: list[dict[str, object]] = []
     for index, entry in enumerate(text_context):
-        if index >= limit:
-            break
         if not isinstance(entry, Sequence) or len(entry) < 4:
             continue
         doc_id, raw_text, metadata, score = entry[:4]

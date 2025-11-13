@@ -86,6 +86,17 @@ def _normalise_scope_values(value: object) -> tuple[list[str], list[str]]:
 
     return recognised, unknown
 
+@dataclass(slots=True, frozen=True)
+class InsertionResult:
+    """Summary of a vector store insertion batch."""
+
+    inserted: int = 0
+    skipped: int = 0
+
+    def __bool__(self) -> bool:
+        return self.inserted > 0
+
+
 class ChromaDatabaseStore:
     """Persist and query document artefacts stored in ChromaDB."""
     _MAX_INSERT_BATCH_SIZE = 5_461
@@ -132,14 +143,15 @@ class ChromaDatabaseStore:
         *,
         batch_size: int = 32,
         namespace: str | None = None,
-    ) -> bool:
-        """Persist text documents in ChromaDB."""
+    ) -> InsertionResult:
+        """Persist text documents in ChromaDB and report insertion metrics."""
 
-        _ = namespace  # Namespace is ignored for single-store deployments.
+        _ = namespace  # Namespace is currently unused for single-store deployments.
 
-        if not documents:
+        valid_documents = [doc for doc in documents if isinstance(doc, Document)]
+        if not valid_documents:
             logger.info("No documents received for ingestion into ChromaDB")
-            return False
+            return InsertionResult()
 
         if batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
@@ -150,8 +162,56 @@ class ChromaDatabaseStore:
         if self.embedding is None:
             raise RuntimeError("ChromaDatabaseStore requires an embedding to add documents")
 
-        for slice_start in range(0, len(documents), self._MAX_INSERT_BATCH_SIZE):
-            document_slice = documents[slice_start : slice_start + self._MAX_INSERT_BATCH_SIZE]
+        grouped: dict[str | None, list[Document]] = {}
+        for document in valid_documents:
+            metadata = document.metadata if isinstance(document.metadata, Mapping) else {}
+            source_value = metadata.get("source") if isinstance(metadata, Mapping) else None
+            source_key = source_value if isinstance(source_value, str) and source_value else None
+            grouped.setdefault(source_key, []).append(document)
+
+        insertion_queue: list[Document] = []
+        skipped_chunks = 0
+
+        for source_key, chunks in grouped.items():
+            fingerprint_values = {
+                str(value)
+                for value in (
+                    (chunk.metadata or {}).get("source_fingerprint")
+                    if isinstance(chunk.metadata, Mapping)
+                    else None
+                    for chunk in chunks
+                )
+                if isinstance(value, str) and value
+            }
+            fingerprint = next(iter(fingerprint_values)) if fingerprint_values else None
+
+            if source_key is not None:
+                existing_ids, existing_metadata = self._fetch_existing_chunks(source_key)
+                existing_fingerprints = {
+                    str(entry.get("source_fingerprint"))
+                    for entry in existing_metadata
+                    if isinstance(entry.get("source_fingerprint"), str)
+                }
+
+                if (
+                    fingerprint
+                    and existing_ids
+                    and existing_fingerprints == {fingerprint}
+                ):
+                    skipped_chunks += len(chunks)
+                    continue
+
+                if existing_ids:
+                    self.collection.delete(where={"source": source_key})
+
+            insertion_queue.extend(chunks)
+
+        if not insertion_queue:
+            return InsertionResult(inserted=0, skipped=skipped_chunks)
+
+        total_inserted = 0
+        for slice_start in range(0, len(insertion_queue), self._MAX_INSERT_BATCH_SIZE):
+            document_slice = insertion_queue[slice_start : slice_start + self._MAX_INSERT_BATCH_SIZE]
             if not document_slice:
                 continue
 
@@ -185,8 +245,43 @@ class ChromaDatabaseStore:
                 embeddings=embeddings,
                 metadatas=metadata_payload,
             )
+            total_inserted += len(document_slice)
 
-        return True
+        return InsertionResult(inserted=total_inserted, skipped=skipped_chunks)
+
+    def _fetch_existing_chunks(
+        self, source: str
+    ) -> tuple[list[str], list[dict[str, object]]]:
+        """Return identifiers and metadata for stored chunks from ``source``."""
+
+        if self.collection is None:
+            return [], []
+
+        try:
+            payload = self.collection.get(
+                where={"source": source},
+                include=["ids", "metadatas"],
+            )
+        except Exception as exc:
+            logger.warning("Failed to query existing chunks for '%s': %s", source, exc)
+            return [], []
+
+        if not isinstance(payload, Mapping):
+            return [], []
+
+        raw_ids = payload.get("ids")
+        ids: list[str] = []
+        if isinstance(raw_ids, Sequence) and not isinstance(raw_ids, (str, bytes, bytearray)):
+            ids = [str(entry) for entry in raw_ids]
+
+        raw_metadata = payload.get("metadatas")
+        metadata_entries: list[dict[str, object]] = []
+        if isinstance(raw_metadata, Sequence) and not isinstance(raw_metadata, (str, bytes, bytearray)):
+            for entry in raw_metadata:
+                if isinstance(entry, Mapping):
+                    metadata_entries.append(dict(entry))
+
+        return ids, metadata_entries
 
     def _ensure_collections_ready(self) -> None:
         """Ensure the backing collection exists."""
@@ -273,10 +368,10 @@ class PartitionedChromaDatabaseStore:
         *,
         batch_size: int = 32,
         namespace: str | None = None,
-    ) -> bool:
+    ) -> InsertionResult:
         """Delegate ingestion to the appropriate backing store."""
         store = self._select_store(namespace)
-        return store.add_documents(documents, batch_size=batch_size)
+        return store.add_documents(documents, batch_size=batch_size, namespace=namespace)
 
     def search(
         self,
@@ -506,8 +601,10 @@ class PartitionedChromaDatabaseStore:
 @dataclass(slots=True, frozen=True)
 class ProcessingResult:
     """Outcome of a database ingestion attempt."""
+
     success: bool
     documents_ingested: int = 0
+    documents_skipped: int = 0
     summaries_created: int = 0
 
 
@@ -571,19 +668,30 @@ class DatabaseRagPipeline:
             return ProcessingResult(success=False)
 
         try:
-            stored = self.store.add_documents(documents, namespace=namespace)
+            insertion = self.store.add_documents(documents, namespace=namespace)
         except Exception as exc:
             logger.exception("Failed to store documents in ChromaDB: %s", exc)
             return ProcessingResult(success=False)
 
-        if not stored:
+        if insertion.inserted == 0 and insertion.skipped == 0:
+            logger.warning(
+                "ChromaDB ingestion produced no changes or skips for '%s'", path
+            )
             return ProcessingResult(success=False)
+
+        if insertion.inserted > 0:
+            logger.info(
+                "Stored %s new chunks for '%s'", insertion.inserted, path
+            )
+        else:
+            logger.info("No changes detected for '%s'; skipping reinsertion", path)
 
         self._cleanup_ingest_artifacts(adapter_result.cleanup_paths)
 
         return ProcessingResult(
             success=True,
-            documents_ingested=len(documents),
+            documents_ingested=insertion.inserted,
+            documents_skipped=insertion.skipped,
             summaries_created=0,
         )
 

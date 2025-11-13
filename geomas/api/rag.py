@@ -173,7 +173,20 @@ class RagApi:
                     logger.error("Failed to ingest documents from %s", documents_path)
                     return False
 
-                logger.info("RAG pipeline initialised successfully from %s", documents_path)
+                if result.documents_ingested > 0:
+                    logger.info(
+                        "RAG pipeline initialised successfully from %s", documents_path
+                    )
+                elif result.documents_skipped > 0:
+                    logger.info(
+                        "RAG pipeline initialised from %s; documents unchanged",
+                        documents_path,
+                    )
+                else:
+                    logger.info(
+                        "RAG pipeline initialised from %s without new documents",
+                        documents_path,
+                    )
                 return True
 
             if self.is_initialized:
@@ -239,14 +252,23 @@ class RagApi:
                 logger.error("Ingestion pipeline reported failure for %s", path)
                 return False
 
-            logger.info("Successfully ingested documents from %s", path)
+            if result.documents_ingested > 0:
+                logger.info(
+                    "Successfully ingested %s documents from %s",
+                    result.documents_ingested,
+                    path,
+                )
+            elif result.documents_skipped > 0:
+                logger.info("Skipped ingestion for %s; documents unchanged", path)
+            else:
+                logger.info("Ingestion completed for %s without new documents", path)
             return True
 
     def run_workflow(
         self,
         question: str,
         *,
-        documents_path: Path | str | None = None,
+        documents_dir: Path | str | None = None,
         uploaded_documents: Sequence[Path | str] | None = None,
         query_kwargs: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any]:
@@ -254,7 +276,7 @@ class RagApi:
 
         Args:
             question: Natural-language prompt executed against the pipeline.
-            documents_path: Optional base path ingested before the query.
+            documents_dir: Optional base path ingested before the query.
             uploaded_documents: Optional sequence of additional artefacts to ingest.
             query_kwargs: Optional mapping forwarded to :meth:`StandardRAGPipeline.query`.
 
@@ -360,6 +382,7 @@ class RagApi:
                 ingestion_snapshot = {
                     "success": bool(getattr(last_result, "success", False)),
                     "documents": int(getattr(last_result, "documents_ingested", 0)),
+                    "skipped": int(getattr(last_result, "documents_skipped", 0)),
                     "summaries": int(getattr(last_result, "summaries_created", 0)),
                 }
             return {

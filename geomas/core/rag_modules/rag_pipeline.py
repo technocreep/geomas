@@ -551,7 +551,13 @@ class StandardRAGPipeline(BaseRAGPipeline):
 
         self.last_ingest_result = result
         if result.success:
-            logger.info("Ingested %s documents", result.documents_ingested)
+            if result.documents_ingested > 0:
+                logger.info("Ingested %s documents", result.documents_ingested)
+            elif result.documents_skipped > 0:
+                logger.info(
+                    "Skipped ingestion for %s; documents unchanged",
+                    documents_path,
+                )
         return result.success
 
     def query(self, question: str, **kwargs: Any) -> Dict[str, Any]:

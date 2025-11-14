@@ -211,7 +211,7 @@ class RagApi:
         self._state_lock = RLock()
         self.is_initialized = False
         self.config = self._build_config(overrides=config, config_path=config_path)
-        self.pipeline: StandardRAGPipeline | None = StandardRAGPipeline(self.config.to_dict())
+        self.pipeline = StandardRAGPipeline(self.config.to_dict())
 
     def _build_config(
         self,
@@ -314,12 +314,17 @@ class RagApi:
             self.is_initialized = True
         return result
 
-    def initialize_pipeline(self, documents_dir: Optional[str | Path] = None) -> bool:
+    def initialize_pipeline(
+            self,
+            documents_dir: Optional[str | Path],
+            namespace: str = "global",
+    ) -> bool:
         """Initialise the pipeline and optionally ingest documents.
 
         Args:
             documents_dir: Optional path pointing to documents that should be
                 ingested as part of the initialisation sequence.
+            namespace: Target namespace ("global" or f"{chat_id}_local").
 
         Returns:
             ``True`` when the pipeline is ready for queries. ``False`` when the
@@ -327,37 +332,8 @@ class RagApi:
         """
         with self._state_lock:
             self._require_pipeline()
-
-            if os.listdir(documents_dir):
-                logger.info("Starting ingestion from %s", documents_dir)
-                result = self._ingest_path(documents_dir, namespace="global")
-                if not result.success:
-                    logger.error("Failed to ingest documents from %s", documents_dir)
-                    return False
-
-                if result.documents_ingested > 0:
-                    logger.info(
-                        "RAG pipeline initialised successfully from %s", documents_dir
-                    )
-                elif result.documents_skipped > 0:
-                    logger.info(
-                        "RAG pipeline initialised from %s; documents unchanged",
-                        documents_dir,
-                    )
-                else:
-                    logger.info(
-                        "RAG pipeline initialised from %s without new documents",
-                        documents_dir,
-                    )
-                return True
-
-            if self.is_initialized:
-                logger.info("RAG pipeline already initialised; skipping reinitialisation")
-                return True
-
             self.is_initialized = True
-            logger.info("Initialising RAG pipeline without ingestion")
-            return True
+            return self.pipeline.ingest_documents(documents_dir, namespace=namespace)
 
     def ask_question(self, question: str, **kwargs: Any) -> Dict[str, Any]:
         """Query the pipeline and return the structured response.

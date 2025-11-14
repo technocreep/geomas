@@ -316,6 +316,7 @@ def format_text_context(
 ) -> list[dict[str, object]]:
     """Summarise raw ``text_context`` entries for presentation layers."""
     formatted: list[dict[str, object]] = []
+
     for index, entry in enumerate(text_context):
         if not isinstance(entry, Sequence) or len(entry) < 4:
             continue

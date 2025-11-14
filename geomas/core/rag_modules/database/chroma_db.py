@@ -51,10 +51,24 @@ def _extract_scores_from_payload(
     return [float("nan")] * expected
 
 
-def _normalise_scope_values(value: object) -> tuple[list[str], list[str]]:
+def _normalise_scope_values(
+    value: object, recognised_scopes: Iterable[str] | None = None
+) -> tuple[list[str], list[str]]:
     """Parse scope filter values into recognised and unknown candidates."""
+
     recognised: list[str] = []
     unknown: list[str] = []
+
+    allowed: dict[str, str] = {}
+    if recognised_scopes:
+        for scope in recognised_scopes:
+            if not isinstance(scope, str):
+                continue
+            scope_key = scope.strip().lower()
+            if scope_key:
+                allowed.setdefault(scope_key, scope)
+    if not allowed:
+        allowed = {"global": "global", "local": "local"}
 
     def _register(candidate: object) -> None:
         if not isinstance(candidate, str):
@@ -64,7 +78,7 @@ def _normalise_scope_values(value: object) -> tuple[list[str], list[str]]:
         if not scope_label:
             unknown.append(repr(candidate))
             return
-        if scope_label in {"global", "local"}:
+        if scope_label in allowed:
             if scope_label not in recognised:
                 recognised.append(scope_label)
         else:
@@ -249,6 +263,59 @@ class ChromaDatabaseStore:
 
         return InsertionResult(inserted=total_inserted, skipped=skipped_chunks)
 
+    def search(
+        self,
+        query: str,
+        *,
+        collection_type: str = "text",
+        top_k: int = 5,
+        filters: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Execute a semantic search query against the managed collection."""
+
+        if collection_type.lower() != "text":
+            raise ValueError(f"Unknown collection type: {collection_type}")
+
+        try:
+            chunk_num = int(top_k)
+        except (TypeError, ValueError):
+            chunk_num = 5
+        if chunk_num <= 0:
+            chunk_num = 5
+
+        if self.embedding is None:
+            raise RuntimeError("ChromaDatabaseStore requires an embedding to execute searches")
+
+        if self.collection is None:
+            self._ensure_collections_ready()
+        collection = getattr(self, "collection", None)
+        if collection is None:
+            raise RuntimeError("Text collection is not initialised")
+
+        client = getattr(self, "client", None)
+        if client is None:
+            raise RuntimeError("ChromaDatabaseStore client is unavailable")
+
+        query_vector = self.embedding.embed_query(query)
+        if isinstance(query_vector, np.ndarray):
+            vector_values = query_vector.tolist()
+        elif isinstance(query_vector, Sequence) and not isinstance(
+            query_vector, (str, bytes, bytearray)
+        ):
+            vector_values = list(query_vector)
+        else:
+            vector_values = [query_vector]
+        query_payload = [float(value) for value in vector_values]
+
+        metadata_filter = dict(filters) if isinstance(filters, Mapping) else None
+
+        return client.query_chromadb(
+            collection=collection,
+            query_embeddings=[query_payload],
+            metadata_filter=metadata_filter,
+            chunk_num=chunk_num,
+        )
+
     def _fetch_existing_chunks(
         self, source: str
     ) -> tuple[list[str], list[dict[str, object]]]:
@@ -263,7 +330,7 @@ class ChromaDatabaseStore:
                 include=["ids", "metadatas"],
             )
         except Exception as exc:
-            # logger.warning("Failed to query existing chunks for '%s': %s", source, exc)
+            logger.warning("Failed to query existing chunks for '%s': %s", source, exc)
             return [], []
 
         if not isinstance(payload, Mapping):
@@ -299,6 +366,7 @@ class ChromaDatabaseStore:
 @dataclass(slots=True)
 class _SearchEntry:
     """Internal helper representing a scored document."""
+
     scope: str
     identifier: str
     document: str
@@ -307,13 +375,26 @@ class _SearchEntry:
     distance: float | None = None
 
 
+@dataclass(slots=True)
+class _ScopedStore:
+    """Descriptor describing a managed Chroma store."""
+
+    scope_label: str
+    normalised_scope: str
+    collection_name: str
+    store: ChromaDatabaseStore
+    read_only: bool
+
+
 class PartitionedChromaDatabaseStore:
-    """Aggregate store coordinating global and optional local Chroma instances."""
+    """Aggregate store coordinating global, local, and auxiliary Chroma instances."""
+
     def __init__(
         self,
         *,
         global_store: ChromaDatabaseStore,
         local_store: ChromaDatabaseStore | None = None,
+        extra_readonly_stores: Mapping[str, object] | Sequence[object] | None = None,
     ) -> None:
         if global_store is None:
             raise ValueError("global_store must be provided")
@@ -323,19 +404,40 @@ class PartitionedChromaDatabaseStore:
         self.client = getattr(global_store, "client", None)
         self.local_client = getattr(local_store, "client", None) if local_store else None
         self.collection_name = getattr(global_store, "collection_name", None)
-        self.collection = self.client.ensure_collection(self.collection_name)
+        self.collection = None
+        if self.client is not None:
+            ensure_method = getattr(self.client, "ensure_collection", None)
+            if callable(ensure_method):
+                try:
+                    self.collection = ensure_method(self.collection_name)
+                except Exception as exc:
+                    logger.debug("Failed to ensure primary collection: %s", exc)
         self.embedding = getattr(global_store, "embedding", None)
 
+        self._scoped_targets: dict[str, _ScopedStore] = {}
+        self._scope_order: list[str] = []
+        self._readonly_by_collection: dict[str, _ScopedStore] = {}
         self._closed = False
+
+        self._register_primary_scope(global_store, scope_label="global")
+        if local_store is not None:
+            self._register_primary_scope(local_store, scope_label="local")
+
+        if extra_readonly_stores:
+            self.register_readonly_stores(extra_readonly_stores)
 
         self._ensure_collections_ready()
 
     def close(self) -> None:
-        """Close both backing stores and release their resources."""
+        """Close all managed stores and release their resources."""
+
         if getattr(self, "_closed", False):
             return
 
         self._closed = True
+
+        for key in list(self._readonly_by_collection.keys()):
+            self.unregister_readonly_store(key, close=True)
 
         for store in (self.global_store, self.local_store):
             if store is None:
@@ -350,17 +452,149 @@ class PartitionedChromaDatabaseStore:
         self.client = None
         self.local_client = None
         self.collection_name = None
+        self.collection = None
         self.embedding = None
+        self._scoped_targets.clear()
+        self._scope_order.clear()
+        self._readonly_by_collection.clear()
 
     def ensure_collections(self) -> None:
         """Ensure all managed collections exist."""
-        for store in (self.global_store, self.local_store):
-            if store is None:
-                continue
-            store._ensure_collections_ready()
+
+        for entry in self._iter_scope_entries():
+            self._ensure_store_ready(entry.store)
 
     def _ensure_collections_ready(self) -> None:
         self.ensure_collections()
+
+    def available_scopes(self) -> tuple[str, ...]:
+        """Return the ordered scope labels known to the composite store."""
+
+        return tuple(entry.scope_label for entry in self._iter_scope_entries())
+
+    def register_readonly_store(
+        self,
+        collection_name: str,
+        store: ChromaDatabaseStore,
+        *,
+        scope_label: str | None = None,
+    ) -> str | None:
+        """Attach ``store`` as a read-only scope."""
+
+        if store is None:
+            return None
+
+        label_source = scope_label if isinstance(scope_label, str) else collection_name
+        scope_label = str(label_source).strip()
+        if not scope_label:
+            scope_label = str(collection_name)
+
+        normalised_scope = scope_label.strip().lower()
+        if not normalised_scope:
+            return None
+
+        existing_scope = self._scoped_targets.get(normalised_scope)
+        if existing_scope is not None and not existing_scope.read_only:
+            logger.info(
+                "Scope '%s' already managed by a writable store; skipping read-only registration",
+                scope_label,
+            )
+            return None
+
+        collection_value = (
+            str(collection_name).strip()
+            or str(getattr(store, "collection_name", "")).strip()
+        )
+        if not collection_value:
+            raise ValueError("collection_name must be provided for read-only store registration")
+
+        collection_key = collection_value.lower()
+
+        if existing_scope is not None and existing_scope.read_only:
+            self.unregister_readonly_store(existing_scope.collection_name, close=True)
+
+        if collection_key in self._readonly_by_collection:
+            self.unregister_readonly_store(collection_value, close=True)
+
+        resolved_collection = (
+            str(getattr(store, "collection_name", collection_value) or collection_value)
+        )
+
+        entry = _ScopedStore(
+            scope_label=scope_label,
+            normalised_scope=normalised_scope,
+            collection_name=resolved_collection,
+            store=store,
+            read_only=True,
+        )
+        self._scoped_targets[normalised_scope] = entry
+        if normalised_scope not in self._scope_order:
+            self._scope_order.append(normalised_scope)
+        self._readonly_by_collection[collection_key] = entry
+        if resolved_collection and resolved_collection.lower() != collection_key:
+            self._readonly_by_collection[resolved_collection.lower()] = entry
+        self._ensure_store_ready(store)
+        return collection_key
+
+    def register_readonly_stores(
+        self, stores: Mapping[str, object] | Sequence[object] | None
+    ) -> list[str]:
+        """Register multiple read-only stores."""
+
+        if not stores:
+            return []
+
+        if isinstance(stores, Mapping):
+            items = list(stores.items())
+        else:
+            items = list(stores)
+
+        registered: list[str] = []
+        for entry in items:
+            try:
+                collection_name, store, scope_label = self._coerce_store_entry(entry)
+            except ValueError as exc:
+                logger.warning("Skipping invalid read-only store descriptor: %s", exc)
+                continue
+
+            key = self.register_readonly_store(
+                collection_name,
+                store,
+                scope_label=scope_label,
+            )
+            if key is not None:
+                registered.append(key)
+
+        return registered
+
+    def unregister_readonly_store(self, collection_name: str, *, close: bool = False) -> None:
+        """Detach a previously registered read-only store."""
+
+        key = str(collection_name or "").strip().lower()
+        if not key:
+            return
+
+        entry = self._readonly_by_collection.pop(key, None)
+        if entry is None:
+            return
+
+        for alias, candidate in list(self._readonly_by_collection.items()):
+            if candidate is entry:
+                self._readonly_by_collection.pop(alias, None)
+
+        self._scoped_targets.pop(entry.normalised_scope, None)
+        self._scope_order = [
+            scope for scope in self._scope_order if scope != entry.normalised_scope
+        ]
+
+        if close:
+            self._safe_close_store(entry.store)
+
+    def clear_readonly_stores(self) -> None:
+        """Detach and close all auxiliary read-only stores."""
+
+        for key in list(self._readonly_by_collection.keys()):
+            self.unregister_readonly_store(key, close=True)
 
     def add_documents(
         self,
@@ -370,6 +604,7 @@ class PartitionedChromaDatabaseStore:
         namespace: str | None = None,
     ) -> InsertionResult:
         """Delegate ingestion to the appropriate backing store."""
+
         store = self._select_store(namespace)
         return store.add_documents(documents, batch_size=batch_size, namespace=namespace)
 
@@ -382,6 +617,7 @@ class PartitionedChromaDatabaseStore:
         filters: Mapping[str, object] | None = None,
     ) -> dict:
         """Query all relevant stores and merge their responses."""
+
         if collection_type.lower() != "text":
             raise ValueError(f"Unknown collection type: {collection_type}")
 
@@ -389,14 +625,20 @@ class PartitionedChromaDatabaseStore:
         targets = self._resolve_targets(scopes)
 
         aggregate: list[_SearchEntry] = []
-        for scope_label, store in targets:
-            payload = store.search(
+        for scoped_store in targets:
+            payload = scoped_store.store.search(
                 query,
                 collection_type=collection_type,
                 top_k=top_k,
                 filters=dict(base_filters) if base_filters is not None else None,
             )
-            aggregate.extend(self._expand_payload(payload, scope_label))
+            aggregate.extend(
+                self._expand_payload(
+                    payload,
+                    scoped_store.scope_label,
+                    scoped_store.collection_name,
+                )
+            )
 
         if not aggregate:
             return {
@@ -421,7 +663,10 @@ class PartitionedChromaDatabaseStore:
         trimmed = aggregate[:limit] if limit else []
 
         similarities = [entry.similarity for entry in trimmed]
-        distances = [entry.distance if entry.distance is not None else float("nan") for entry in trimmed]
+        distances = [
+            entry.distance if entry.distance is not None else float("nan")
+            for entry in trimmed
+        ]
 
         return {
             "ids": [[entry.identifier for entry in trimmed]],
@@ -442,42 +687,70 @@ class PartitionedChromaDatabaseStore:
         if raw_scope is None:
             return [], base_filters
 
-        scopes, unknown = _normalise_scope_values(raw_scope)
+        scopes, unknown = _normalise_scope_values(raw_scope, self.available_scopes())
         if unknown:
             logger.warning("Ignoring unsupported scope filter values: %s", ", ".join(unknown))
 
         return scopes, base_filters
 
-    def _resolve_targets(
-        self, scopes: Sequence[str]
-    ) -> list[tuple[str, ChromaDatabaseStore]]:
-        global_store = getattr(self, "global_store", None)
-        local_store = getattr(self, "local_store", None)
+    def _resolve_targets(self, scopes: Sequence[str]) -> list[_ScopedStore]:
+        entries = self._iter_scope_entries()
+        if not entries:
+            raise RuntimeError("No Chroma stores are available for querying")
 
-        targets: list[tuple[str, ChromaDatabaseStore]] = []
-        request_global = not scopes or "global" in scopes
-        request_local = ("local" in scopes) if scopes else bool(local_store)
+        if not scopes:
+            return entries
 
-        if "local" in scopes and local_store is None:
-            logger.info(
-                "Local scope requested but no local store is configured; falling back to global scope",
-            )
-            request_global = True
-            request_local = False
+        requested = [
+            scope.strip().lower()
+            for scope in scopes
+            if isinstance(scope, str) and scope.strip()
+        ]
+        if not requested:
+            return entries
 
-        if request_global and global_store is not None:
-            targets.append(("global", global_store))
+        requested_set = set(requested)
+        available_lookup = {entry.normalised_scope: entry for entry in entries}
 
-        if request_local and local_store is not None:
-            targets.append(("local", local_store))
+        selected: list[_ScopedStore] = []
+        for scope in requested:
+            entry = available_lookup.get(scope)
+            if entry is not None and entry not in selected:
+                selected.append(entry)
 
-        if not targets:
-            if global_store is None and local_store is None:
-                raise RuntimeError("No Chroma stores are available for querying")
-            if global_store is not None:
-                targets.append(("global", global_store))
+        if "local" in requested_set and all(
+            entry.normalised_scope != "local" for entry in selected
+        ):
+            if self.local_store is None:
+                logger.info(
+                    "Local scope requested but no local store is configured; falling back to global scope",
+                )
+                global_entry = available_lookup.get("global")
+                if global_entry is not None and global_entry not in selected:
+                    selected.append(global_entry)
 
-        return targets
+        missing = requested_set - {entry.normalised_scope for entry in selected}
+        for scope in missing:
+            entry = available_lookup.get(scope)
+            if entry is not None and entry not in selected:
+                selected.append(entry)
+
+        if not selected:
+            global_entry = available_lookup.get("global")
+            if global_entry is not None:
+                return [global_entry]
+            return [entries[0]]
+
+        ordered_selected: list[_ScopedStore] = []
+        selected_ids = {id(entry) for entry in selected}
+        for scope_key in self._scope_order:
+            entry = self._scoped_targets.get(scope_key)
+            if entry is None:
+                continue
+            if id(entry) in selected_ids and entry not in ordered_selected:
+                ordered_selected.append(entry)
+
+        return ordered_selected or selected
 
     def _select_store(self, namespace: str | None) -> ChromaDatabaseStore:
         label = (namespace or "global").strip().lower()
@@ -495,12 +768,21 @@ class PartitionedChromaDatabaseStore:
             )
             return global_store
 
+        scoped_entry = self._scoped_targets.get(label)
+        if scoped_entry is not None and scoped_entry.read_only:
+            raise RuntimeError(f"Namespace '{namespace}' refers to a read-only Chroma store")
+
         if label not in {"", "global"}:
             logger.warning("Unknown namespace '%s'; defaulting to global store", namespace)
 
         return global_store
 
-    def _expand_payload(self, payload: Mapping[str, object], scope: str) -> list[_SearchEntry]:
+    def _expand_payload(
+        self,
+        payload: Mapping[str, object],
+        scope: str,
+        collection_name: str | None,
+    ) -> list[_SearchEntry]:
         if not isinstance(payload, Mapping):
             return []
 
@@ -538,6 +820,9 @@ class PartitionedChromaDatabaseStore:
             else:
                 metadata = {}
             metadata["scope"] = scope
+            metadata["database_scope"] = scope
+            if collection_name:
+                metadata.setdefault("collection_name", str(collection_name))
 
             document_value = documents_row[index] if index < len(documents_row) else ""
             identifier_value = ids_row[index] if index < len(ids_row) else ""
@@ -567,35 +852,92 @@ class PartitionedChromaDatabaseStore:
             return first
         return value
 
-    def search(
-        self,
-        query: str,
-        *,
-        collection_type: str = "text",
-        top_k: int = 5,
-        filters: Mapping[str, object] | None = None,
-    ) -> dict:
-        """Query a Chroma collection for the given text."""
-        if collection_type.lower() != "text":
-            raise ValueError(f"Unknown collection type: {collection_type}")
+    def _register_primary_scope(
+        self, store: ChromaDatabaseStore, *, scope_label: str
+    ) -> None:
+        label = scope_label.strip().lower() if isinstance(scope_label, str) else str(scope_label)
+        if not label:
+            raise ValueError("scope_label must be a non-empty string")
 
-        if self.collection is None:
-            raise RuntimeError("Text collection is not initialised")
-
-        if self.embedding is None:
-            raise RuntimeError("ChromaDatabaseStore requires an embedding to search")
-
-        query_embedding = self.embedding.embed_query(query)
-        prepared_embedding = (
-            query_embedding.tolist() if isinstance(query_embedding, np.ndarray) else list(query_embedding)
+        entry = _ScopedStore(
+            scope_label=scope_label,
+            normalised_scope=label,
+            collection_name=str(getattr(store, "collection_name", scope_label) or scope_label),
+            store=store,
+            read_only=False,
         )
+        self._scoped_targets[label] = entry
+        if label not in self._scope_order:
+            self._scope_order.append(label)
 
-        return self.client.query_chromadb(
-            self.collection,
-            query_embeddings=[prepared_embedding],
-            metadata_filter=dict(filters) if isinstance(filters, Mapping) and filters else None,
-            chunk_num=top_k,
-        )
+    def _iter_scope_entries(self) -> list[_ScopedStore]:
+        entries: list[_ScopedStore] = []
+        seen: set[int] = set()
+        for scope_key in self._scope_order:
+            entry = self._scoped_targets.get(scope_key)
+            if entry is None:
+                continue
+            identity = id(entry.store)
+            if identity in seen:
+                continue
+            entries.append(entry)
+            seen.add(identity)
+        return entries
+
+    def _ensure_store_ready(self, store: ChromaDatabaseStore | None) -> None:
+        if store is None:
+            return
+        ensure_method = getattr(store, "_ensure_collections_ready", None)
+        if callable(ensure_method):
+            try:
+                ensure_method()
+            except Exception as exc:
+                logger.debug("Failed to ensure collections for %s: %s", store.collection_name, exc)
+
+    @staticmethod
+    def _safe_close_store(store: ChromaDatabaseStore | None) -> None:
+        if store is None:
+            return
+        try:
+            store.close()
+        except Exception as exc:
+            logger.debug("Failed to close auxiliary store %s: %s", store.collection_name, exc)
+
+    @staticmethod
+    def _coerce_store_entry(
+        descriptor: object,
+    ) -> tuple[str, ChromaDatabaseStore, str | None]:
+        if isinstance(descriptor, tuple):
+            if len(descriptor) == 3:
+                collection_name, store, scope_label = descriptor
+            elif len(descriptor) == 2:
+                collection_name, store = descriptor
+                scope_label = None
+            else:
+                raise ValueError("Tuples must contain 2 or 3 elements")
+        elif isinstance(descriptor, Sequence):
+            if len(descriptor) < 2:
+                raise ValueError("Descriptors must include collection name and store")
+            collection_name = descriptor[0]
+            store = descriptor[1]
+            scope_label = descriptor[2] if len(descriptor) > 2 else None
+        else:
+            raise ValueError("Unsupported descriptor type")
+
+        if not isinstance(collection_name, str):
+            collection_name = str(collection_name)
+
+        if isinstance(store, tuple) and len(store) == 2 and isinstance(store[0], ChromaDatabaseStore):
+            store, derived_scope = store
+            scope_label = scope_label or derived_scope
+
+        if not isinstance(store, ChromaDatabaseStore):
+            raise ValueError("Descriptor payload must include a ChromaDatabaseStore instance")
+
+        if scope_label is not None and not isinstance(scope_label, str):
+            scope_label = str(scope_label)
+
+        return collection_name, store, scope_label
 
 
 @dataclass(slots=True, frozen=True)
@@ -772,7 +1114,14 @@ class DatabaseRagPipeline:
 
         scope_filter = filter_spec.get("scope")
         if scope_filter is not None:
-            _, unknown_scopes = _normalise_scope_values(scope_filter)
+            available_scopes: Iterable[str] | None = None
+            scope_method = getattr(self.store, "available_scopes", None)
+            if callable(scope_method):
+                try:
+                    available_scopes = tuple(scope_method())
+                except Exception as exc:
+                    logger.debug("Failed to resolve store scopes: %s", exc)
+            _, unknown_scopes = _normalise_scope_values(scope_filter, available_scopes)
             if unknown_scopes:
                 logger.warning(
                     "retrieve_context received unsupported scope filters: %s",

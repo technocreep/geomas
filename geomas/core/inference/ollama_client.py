@@ -240,19 +240,29 @@ def load_ollama_settings(
 
 def build_ollama_rag_config(
     *,
-    chat_id: str,
+    chat_id: str | None = None,
     global_rag_dir: Path,
     local_rag_dir: Path | None = None,
     settings: OllamaSettings | None = None,
 ) -> RAGConfig:
     resolved_settings = settings or load_ollama_settings()
 
+    global_rag_dir = Path(global_rag_dir).expanduser().resolve()
+    local_rag_dir = (
+        Path(local_rag_dir).expanduser().resolve() if local_rag_dir is not None else None
+    )
+
+    if local_rag_dir is not None:
+        collection_name = str(chat_id) if chat_id else "geomas"
+    else:
+        collection_name = str(chat_id) if chat_id else "global"
+
     overrides: Dict[str, Any] = {
         "parsing": {"enable_parser": False},
         "database": {
             "client_mode": "persistent",
-            "persistent_path": str(global_rag_dir),
-            "collection_name": chat_id if local_rag_dir is not None else "global",
+            "persistent_path": str(local_rag_dir or global_rag_dir),
+            "collection_name": collection_name,
         },
         "retrieval": {
             "top_k": 5,
@@ -262,6 +272,9 @@ def build_ollama_rag_config(
         "ranking": {
             "use_llm_reranking": False,
             "chroma": {"enabled": True},
+        },
+        "vector_store": {
+            "client": {"persistent_path": str(global_rag_dir)},
         },
         "inference": {
             "enable_remote_services": True,
@@ -274,14 +287,17 @@ def build_ollama_rag_config(
         },
     }
 
-    database_overrides = overrides.setdefault("database", {})
-    collection_name = str(database_overrides.get("collection_name", "geomas"))
-    database_overrides["local_collection_name"] = f"{collection_name}_local"
+    database_overrides = overrides["database"]
+    if local_rag_dir is not None:
+        database_overrides["local_collection_name"] = f"{collection_name}_local"
 
     vector_store_overrides = overrides.setdefault("vector_store", {})
-    vector_store_overrides["local_client"] = {
-        "persistent_path": str(local_rag_dir),
-    }
+    client_overrides = vector_store_overrides.setdefault("client", {})
+    client_overrides["persistent_path"] = str(global_rag_dir)
+    if local_rag_dir is not None:
+        vector_store_overrides["local_client"] = {
+            "persistent_path": str(local_rag_dir),
+        }
 
     base_config = RAGConfig.default().to_dict()
     _deep_update(base_config, overrides)

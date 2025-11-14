@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import logging
 import inspect
 from pathlib import Path
@@ -327,7 +328,7 @@ class RagApi:
         with self._state_lock:
             self._require_pipeline()
 
-            if documents_dir:
+            if os.listdir(documents_dir):
                 logger.info("Starting ingestion from %s", documents_dir)
                 result = self._ingest_path(documents_dir, namespace="global")
                 if not result.success:

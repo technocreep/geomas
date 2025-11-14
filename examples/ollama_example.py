@@ -112,6 +112,7 @@ def initialize_global_rag(
             settings_overrides=settings,
         ) as api:
             api.initialize_pipeline(paths.get("documents_dir"))
+            api.close()
 
 
 @contextmanager
@@ -135,15 +136,15 @@ def create_chat_session(
         paths.get("local_rag_dir"),
         paths.get("uploads_dir"),
     )
-    api = build_chat_api(
+    with build_chat_api(
         local_rag_dir=paths.get("local_rag_dir"),
         global_rag_dir=paths.get("global_rag_dir"),
         chat_id=chat_id,
         settings_overrides=settings,
-    )
-    for target, path in collection_targets.items():
-        api.initialize_pipeline(str(path))
-    yield api
+    ) as api:
+        for target, path in collection_targets.items():
+            api.initialize_pipeline(str(path), target)
+        yield api
 
 
 def ingest_local_documents(
@@ -152,7 +153,7 @@ def ingest_local_documents(
     paths: Mapping[str, Path] | object,
 ) -> None:
     logger.info("Preparing chat-local vector store at %s", paths.get("local_rag_dir"))
-    api.initialize_pipeline(paths.get("uploads_dir"))
+    api.initialize_pipeline(paths.get("uploads_dir"), api.config.database.get("collection_name"))
 
 
 def answer_with_combined_context(
@@ -264,9 +265,13 @@ def main() -> None:
     chat_id = "sfasfpkasfka"
     include_global = True
     reset_local_rag = False
-    paths["chat_dir"] = Path(f"./data/{chat_id}")
-    paths["uploads_dir"] = Path(f"./data/{chat_id}/uploads")
-    paths["local_rag_dir"] = Path(f"./data/{chat_id}/.vector-store")
+    paths = build_paths(
+        documents_dir="./data/global/uploads",
+        global_rag_dir="./data/global/.vector-store",
+        chat_dir=Path(f"./data/{chat_id}"),
+        uploads_dir=Path(f"./data/{chat_id}/uploads"),
+        local_rag_dir=Path(f"./data/{chat_id}/.vector-store"),
+    )
     print(f"Creating new chat: {chat_id}")
 
     collection_targets = default_collection_targets(chat_id, paths=paths, include_global=include_global)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import logging
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -89,53 +90,6 @@ def build_chat_api(
     return RagApi(config=config)
 
 
-def step_initialize_shared_corpus(
-    *,
-    paths: dict[str, Path],
-    settings: Mapping[str, object] | OllamaSettings | None = None,
-) -> bool:
-    with build_chat_api(
-        global_rag_dir=paths.get("global_rag_dir"),
-        settings=settings,
-    ) as api:
-        documents_dir = Path(paths.get("documents_dir"))
-        pipeline = getattr(api, "pipeline", None)
-        has_existing_embeddings = False
-        if pipeline is not None:
-            store = getattr(pipeline, "global_store", None)
-            collection = getattr(store, "collection", None)
-            count = getattr(collection, "count", None)
-            if callable(count):
-                try:
-                    has_existing_embeddings = int(count()) > 0
-                except Exception:
-                    has_existing_embeddings = False
-        if has_existing_embeddings:
-            logger.info(
-                "Shared corpus already available; initialising pipeline without reingestion",
-            )
-            return bool(api.initialize_pipeline())
-        documents_available = False
-        if documents_dir.exists():
-            if documents_dir.is_file():
-                documents_available = True
-            elif documents_dir.is_dir():
-                documents_available = any(
-                    candidate.is_file() for candidate in documents_dir.rglob("*")
-                )
-        if not documents_available:
-            logger.info(
-                "No documents found at %s; initialising pipeline without ingestion",
-                documents_dir,
-            )
-            return bool(api.initialize_pipeline())
-        logger.info(
-            "Ingesting corpus from %s into the shared vector-store",
-            documents_dir,
-        )
-        return bool(api.initialize_pipeline(documents_path=documents_dir))
-
-
 def step_list_and_ingest_uploads(
     api: RagApi,
     *,
@@ -198,11 +152,48 @@ def initialize_global_rag(
     settings: Mapping[str, object] | OllamaSettings | None = None,
 ) -> bool:
     logger.info("Step 1/4: preparing shared corpus at %s", paths.get("global_rag_dir"))
-    return step_initialize_shared_corpus(
-        paths=paths,
-        settings=settings,
-    )
-
+    with build_chat_api(
+            global_rag_dir=paths.get("global_rag_dir"),
+            settings=settings,
+    ) as api:
+        documents_dir = Path(paths.get("documents_dir"))
+        if not os.listdir(paths.get("global_rag_dir")):
+            pipeline = getattr(api, "pipeline", None)
+            has_existing_embeddings = False
+            if pipeline is not None:
+                store = getattr(pipeline, "global_store", None)
+                collection = getattr(store, "collection", None)
+                count = getattr(collection, "count", None)
+                if callable(count):
+                    try:
+                        has_existing_embeddings = int(count()) > 0
+                    except Exception:
+                        has_existing_embeddings = False
+            if has_existing_embeddings:
+                logger.info(
+                    "Shared corpus already available; initialising pipeline without reingestion",
+                )
+                return bool(api.initialize_pipeline())
+            documents_available = False
+            if documents_dir.exists():
+                if documents_dir.is_file():
+                    documents_available = True
+                elif documents_dir.is_dir():
+                    documents_available = any(
+                        candidate.is_file() for candidate in documents_dir.rglob("*")
+                    )
+            if not documents_available:
+                logger.info(
+                    "No documents found at %s; initialising pipeline without ingestion",
+                    documents_dir,
+                )
+                return bool(api.initialize_pipeline())
+            logger.info(
+                "Ingesting corpus from %s into the shared vector-store",
+                documents_dir,
+            )
+            return True
+        return False
 
 @contextmanager
 def create_chat_session(
@@ -227,10 +218,7 @@ def create_chat_session(
         api.initialize_pipeline()
         yield api
     finally:
-        try:
-            api.close()
-        except Exception as exc:
-            logger.debug("Failed to close chat session cleanly: %s", exc)
+        api.close()
 
 
 def ingest_local_documents(
@@ -292,8 +280,8 @@ def main() -> None:
 
     chat_id = "demo-chat"
     paths = build_paths(
-        documents_dir="./data",
-        global_rag_dir="./data/.vector-store",
+        documents_dir="./data/global/uploads",
+        global_rag_dir="./data/global/.vector-store",
         chat_dir=f"./data/{chat_id}",
         uploads_dir=f"./data/{chat_id}/uploads",
         local_rag_dir=f"./data/{chat_id}/.vector-store",
@@ -345,17 +333,11 @@ def main() -> None:
             query_kwargs=query_kwargs,
         )
         show_results(response, context_rows)
-        api.close()
-
 
     chat_id = "sfasfpkasfka"
-    paths = build_paths(
-        documents_dir="./data",
-        global_rag_dir="./data/.vector-store",
-        chat_dir=f"./data/{chat_id}",
-        uploads_dir=f"./data/{chat_id}/uploads",
-        local_rag_dir=f"./data/{chat_id}/.vector-store",
-    )
+    paths["chat_dir"] = Path(f"./data/{chat_id}")
+    paths["uploads_dir"] = Path(f"./data/{chat_id}/uploads")
+    paths["local_rag_dir"] = Path(f"./data/{chat_id}/.vector-store")
     print(f"Creating new chat: {chat_id}")
     with create_chat_session(
         paths=paths,
@@ -378,7 +360,6 @@ def main() -> None:
             query_kwargs=query_kwargs,
         )
         show_results(response, context_rows)
-        api.close()
 
 if __name__ == "__main__":
     main()

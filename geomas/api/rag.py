@@ -129,22 +129,22 @@ class RagApi:
 
     def _ingest_path(
         self,
-        documents_path: Path | str,
+        documents_dir: Path | str,
         *,
         document_name: str | None = None,
         namespace: str = "global",
     ) -> ProcessingResult:
-        """Ingest ``documents_path`` through the standard pipeline helper.
+        """Ingest ``documents_dir`` through the standard pipeline helper.
 
         Args:
-            documents_path: Location of the artefacts to ingest.
+            documents_dir: Location of the artefacts to ingest.
             document_name: Optional metadata override applied during ingestion.
             namespace: Target namespace ("global" or "local").
         """
         pipeline = self._require_pipeline()
         result = rag_pipeline.ingest_documents(
             pipeline,
-            Path(documents_path),
+            Path(documents_dir),
             document_name=document_name,
             namespace=namespace,
         )
@@ -152,11 +152,11 @@ class RagApi:
             self.is_initialized = True
         return result
 
-    def initialize_pipeline(self, documents_path: Optional[str | Path] = None) -> bool:
+    def initialize_pipeline(self, documents_dir: Optional[str | Path] = None) -> bool:
         """Initialise the pipeline and optionally ingest documents.
 
         Args:
-            documents_path: Optional path pointing to documents that should be
+            documents_dir: Optional path pointing to documents that should be
                 ingested as part of the initialisation sequence.
 
         Returns:
@@ -166,26 +166,26 @@ class RagApi:
         with self._state_lock:
             self._require_pipeline()
 
-            if documents_path:
-                logger.info("Starting ingestion from %s", documents_path)
-                result = self._ingest_path(documents_path, namespace="global")
+            if documents_dir:
+                logger.info("Starting ingestion from %s", documents_dir)
+                result = self._ingest_path(documents_dir, namespace="global")
                 if not result.success:
-                    logger.error("Failed to ingest documents from %s", documents_path)
+                    logger.error("Failed to ingest documents from %s", documents_dir)
                     return False
 
                 if result.documents_ingested > 0:
                     logger.info(
-                        "RAG pipeline initialised successfully from %s", documents_path
+                        "RAG pipeline initialised successfully from %s", documents_dir
                     )
                 elif result.documents_skipped > 0:
                     logger.info(
                         "RAG pipeline initialised from %s; documents unchanged",
-                        documents_path,
+                        documents_dir,
                     )
                 else:
                     logger.info(
                         "RAG pipeline initialised from %s without new documents",
-                        documents_path,
+                        documents_dir,
                     )
                 return True
 
@@ -301,9 +301,9 @@ class RagApi:
             pipeline = self._require_pipeline()
 
             base_result: ProcessingResult | None = None
-            if documents_path is not None:
-                logger.info("Running workflow ingestion from %s", documents_path)
-                base_result = self._ingest_path(documents_path)
+            if documents_dir is not None:
+                logger.info("Running workflow ingestion from %s", documents_dir)
+                base_result = self._ingest_path(documents_dir)
 
             uploaded_results: list[ProcessingResult] = []
             for candidate in uploads:

@@ -330,7 +330,7 @@ class ChromaDatabaseStore:
                 include=["ids", "metadatas"],
             )
         except Exception as exc:
-            logger.warning("Failed to query existing chunks for '%s': %s", source, exc)
+            # logger.warning("Failed to query existing chunks for '%s': %s", source, exc)
             return [], []
 
         if not isinstance(payload, Mapping):

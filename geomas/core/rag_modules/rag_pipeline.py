@@ -206,7 +206,7 @@ class StandardRAGPipeline(BaseRAGPipeline):
         )
 
         database_config = self.config_template.database
-        collection_name = database_config.collection_name or "geomas_text_documents"
+        collection_name = database_config.collection_name
         store_config = self.config_template.vector_store
         shared_embedding = self._initialise_embedding(self.config_template.retrieval)
         self.store: ChromaDatabaseStore | PartitionedChromaDatabaseStore

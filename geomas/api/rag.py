@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import inspect
 from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, Mapping, Optional, Sequence
@@ -19,10 +20,170 @@ logger = logging.getLogger(__name__)
 
 _OLLAMA_EXPORTS = {
     "OllamaSettings",
-    "build_ollama_rag_config",
     "load_ollama_settings",
-    "run_ollama_workflow",
 }
+
+
+def build_ollama_rag_config(
+    documents_dir: Path | str | None = None,
+    *,
+    cache_dir: Path | str | None = None,
+    local_cache_dir: Path | str | None = None,
+    settings: Mapping[str, object] | object | None = None,
+    chat_id: str | None = None,
+    global_rag_dir: Path | str | None = None,
+    local_rag_dir: Path | str | None = None,
+):
+    """Backward-compatible wrapper around the core Ollama config builder."""
+
+    from geomas.core.inference import ollama_client as _ollama_client
+
+    base_settings = settings
+    if isinstance(base_settings, Mapping):
+        base_settings = _ollama_client.load_ollama_settings().with_overrides(base_settings)
+    elif base_settings is None:
+        base_settings = _ollama_client.load_ollama_settings()
+
+    documents_path: Path | None = None
+    if documents_dir is not None:
+        documents_path = Path(documents_dir).expanduser().resolve()
+
+    global_source = global_rag_dir or cache_dir or documents_path
+    if global_source is None:
+        raise ValueError(
+            "A documents_dir, cache_dir, or global_rag_dir must be provided to build the config",
+        )
+    resolved_global = Path(global_source).expanduser().resolve()
+
+    local_source = local_rag_dir or local_cache_dir
+    resolved_local = (
+        Path(local_source).expanduser().resolve() if local_source is not None else None
+    )
+
+    resolved_chat = chat_id.strip() if isinstance(chat_id, str) and chat_id.strip() else None
+
+    build_core = _ollama_client.build_ollama_rag_config
+
+    cache_value = cache_dir
+    local_cache_value = local_cache_dir
+
+    if documents_path is None:
+        documents_path = resolved_global
+
+    try:
+        config = build_core(  # type: ignore[misc]
+            documents_path,
+            cache_dir=Path(cache_value).expanduser().resolve() if cache_value is not None else None,
+            local_cache_dir=(
+                Path(local_cache_value).expanduser().resolve()
+                if local_cache_value is not None
+                else None
+            ),
+            settings=base_settings,
+        )
+    except TypeError:
+        config = build_core(
+            chat_id=resolved_chat,
+            global_rag_dir=resolved_global,
+            local_rag_dir=resolved_local,
+            settings=base_settings,
+        )
+
+    if isinstance(config, RAGConfig):
+        overrides = config.to_dict()
+        database_overrides = overrides.setdefault("database", {})
+        database_overrides["persistent_path"] = str(resolved_global)
+        collection_name = database_overrides.get("collection_name", "geomas")
+        vector_overrides = overrides.setdefault("vector_store", {})
+        if resolved_local is not None:
+            database_overrides.setdefault("local_collection_name", f"{collection_name}_local")
+            vector_overrides["local_client"] = {"persistent_path": str(resolved_local)}
+        elif "local_client" in vector_overrides:
+            vector_overrides.pop("local_client", None)
+            database_overrides.pop("local_collection_name", None)
+        config = RAGConfig.from_mapping(overrides)
+
+    return config
+
+
+def run_ollama_workflow(
+    question: str,
+    *,
+    documents_dir: Path | str,
+    uploaded_documents: Sequence[Path | str] | None = None,
+    cache_dir: Path | str | None = None,
+    local_cache_dir: Path | str | None = None,
+    settings: Mapping[str, object] | object | None = None,
+    chat_id: str | None = None,
+    global_rag_dir: Path | str | None = None,
+    local_rag_dir: Path | str | None = None,
+) -> Dict[str, Any]:
+    """Execute the Ollama demo workflow while preserving the legacy API."""
+
+    if not question:
+        raise ValueError("Question must be a non-empty string")
+
+    documents_path = Path(documents_dir).expanduser().resolve()
+    uploads = [Path(entry).expanduser().resolve() for entry in (uploaded_documents or [])]
+
+    config = build_ollama_rag_config(
+        documents_path,
+        cache_dir=cache_dir,
+        local_cache_dir=local_cache_dir,
+        settings=settings,
+        chat_id=chat_id,
+        global_rag_dir=global_rag_dir,
+        local_rag_dir=local_rag_dir,
+    )
+
+    from geomas.core.rag_modules import rag_pipeline
+
+    override_pipeline = rag_pipeline.create_standard_pipeline(config)
+
+    query_kwargs: Dict[str, Any] = {"text_top_k": 4, "rerank_top_k": 3}
+
+    with RagApi(config=config) as api:
+        previous_pipeline = api.pipeline
+        api.pipeline = override_pipeline
+        api.is_initialized = False
+
+        run_workflow = getattr(api, "run_workflow")
+        try:
+            signature = inspect.signature(run_workflow)
+            supports_documents_dir = "documents_dir" in signature.parameters
+        except (ValueError, TypeError):
+            supports_documents_dir = True
+
+        workflow_kwargs: Dict[str, Any] = {
+            "uploaded_documents": uploads or None,
+            "query_kwargs": query_kwargs,
+        }
+        if supports_documents_dir:
+            workflow_kwargs["documents_dir"] = documents_path
+        else:
+            workflow_kwargs["documents_path"] = documents_path
+
+        try:
+            workflow = run_workflow(question, **workflow_kwargs)
+        finally:
+            if previous_pipeline is not None and previous_pipeline is not override_pipeline:
+                try:
+                    previous_pipeline.close()
+                except Exception as exc:
+                    logger.debug("Failed to close previous pipeline after workflow: %s", exc)
+
+    response = workflow.get("response", {}) if isinstance(workflow, Mapping) else {}
+    ingestion = workflow.get("base_ingestion") if isinstance(workflow, Mapping) else None
+    uploaded_ingestions = (
+        workflow.get("uploaded_ingestions", []) if isinstance(workflow, Mapping) else []
+    )
+
+    return {
+        "question": question,
+        "ingestion": ingestion,
+        "uploaded_ingestions": uploaded_ingestions,
+        "response": response,
+    }
 
 
 class RagApi:
@@ -269,6 +430,7 @@ class RagApi:
         question: str,
         *,
         documents_dir: Path | str | None = None,
+        documents_path: Path | str | None = None,
         uploaded_documents: Sequence[Path | str] | None = None,
         query_kwargs: Mapping[str, Any] | None = None,
     ) -> Dict[str, Any]:
@@ -277,6 +439,7 @@ class RagApi:
         Args:
             question: Natural-language prompt executed against the pipeline.
             documents_dir: Optional base path ingested before the query.
+            documents_path: Backwards-compatible alias for ``documents_dir``.
             uploaded_documents: Optional sequence of additional artefacts to ingest.
             query_kwargs: Optional mapping forwarded to :meth:`StandardRAGPipeline.query`.
 
@@ -297,13 +460,21 @@ class RagApi:
         uploads: Sequence[Path | str] = uploaded_documents or ()
         kwargs: Dict[str, Any] = dict(query_kwargs or {})
 
+        document_source = documents_dir if documents_dir is not None else documents_path
+        if (
+            documents_dir is not None
+            and documents_path is not None
+            and Path(documents_dir) != Path(documents_path)
+        ):
+            raise ValueError("documents_dir and documents_path refer to different locations")
+
         with self._state_lock:
             pipeline = self._require_pipeline()
 
             base_result: ProcessingResult | None = None
-            if documents_dir is not None:
-                logger.info("Running workflow ingestion from %s", documents_dir)
-                base_result = self._ingest_path(documents_dir)
+            if document_source is not None:
+                logger.info("Running workflow ingestion from %s", document_source)
+                base_result = self._ingest_path(document_source)
 
             uploaded_results: list[ProcessingResult] = []
             for candidate in uploads:

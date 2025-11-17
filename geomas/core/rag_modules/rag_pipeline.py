@@ -678,10 +678,17 @@ class StandardRAGPipeline(BaseRAGPipeline):
         if self._lm_system_prompt:
             messages.append({"role": "system", "content": self._lm_system_prompt})
 
+        instruction = (
+            "Ты — геологический ассистент. Используй данные из раздела Sources, чтобы дать максимально точный и развернутый ответ."
+        )
         prompt = (
-            "Use the provided context to answer the user's question. "
-            "If the context lacks the answer, reply that the information is unavailable.\n\n"
-            f"Context:\n{context_block}\n\nQuestion: {question}\nAnswer:"
+            "### Instruction:\n"
+            f"{instruction}\n\n"
+            "### Input:\n"
+            f"{question}\n\n"
+            "### Sources:\n"
+            f"{context_block}\n\n"
+            "### Response:\n"
         )
         messages.append({"role": "user", "content": prompt})
 

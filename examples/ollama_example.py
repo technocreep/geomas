@@ -15,6 +15,7 @@ from geomas.core.inference.ollama_client import (
     load_ollama_settings,
 )
 from geomas.core.rag_modules.data_adapter import format_text_context
+from geomas.cli import process_visual_docs_with_embedding
 
 
 QUESTION_1 = (
@@ -112,6 +113,11 @@ def initialize_global_rag(
             settings_overrides=settings,
         ) as api:
             api.initialize_pipeline(paths.get("documents_dir"))
+            process_visual_docs_with_embedding(
+                str(paths.get("documents_dir")),
+                collection_name="global",
+                detailed=False,
+            )
             api.close()
 
 

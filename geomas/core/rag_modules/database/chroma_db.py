@@ -119,7 +119,7 @@ class ChromaDatabaseStore:
         self,
         client: ChromaDatabaseClient | None = None,
         *,
-        collection_name: str,
+        collection_name: str = "abc",
         embedding: Embeddings | None = None,
     ) -> None:
         if not collection_name:
@@ -349,6 +349,64 @@ class ChromaDatabaseStore:
                     metadata_entries.append(dict(entry))
 
         return ids, metadata_entries
+
+    def store_visual_documents(
+        self,
+        documents: list[Document],
+        collection_name: str,
+        embeddings: np.ndarray = None,
+    ) -> None:
+        """
+        Store visual document descriptions in a ChromaDB collection.
+
+        This method adds Document objects containing visual descriptions (e.g., descriptions of geological maps,
+        charts, or figures) to a specified ChromaDB collection. It either uses precomputed embeddings (if provided)
+        or generates them in batches using the internal embedding model. Each document is stored with its text content,
+        a unique ID, and enriched metadata indicating its type as 'visual'.
+
+        Args:
+            documents (list[Document]): A list of LangChain Document objects, each containing page_content (text description)
+                                        and optional metadata.
+            collection_name (str): The name of the ChromaDB collection where documents will be stored.
+            embeddings (np.ndarray, optional): Precomputed embeddings for the document texts.
+            window_size (int, optional): The batch size used when generating embeddings internally. Defaults to 15.
+
+        Returns:
+            None
+
+        Notes:
+            - The method enriches each document's metadata with {"type": "visual"}.
+            - Duplicate storage is not checked; new UUIDs are assigned on every call.
+        """
+        if not documents:
+            logger.warning("No documents to store")
+            return
+        logger.info(f"Storing descriptions in ChromaDB collection: {collection_name}")
+        # Get or create collection for visual documents
+        visual_collection = self.client.get_or_create_chroma_collection(
+            collection=collection_name, embedding_function=None
+        )
+        # Prepare documents and metadata
+        doc_texts = [doc.page_content for doc in documents]
+        doc_metadatas = [{"type": "visual", **doc.metadata} for doc in documents]
+
+        # Store in ChromaDB
+        try:
+            visual_collection.add(
+                ids=[str(uuid.uuid4()) for _ in range(len(documents))],
+                documents=doc_texts,
+                embeddings=embeddings,
+                metadatas=doc_metadatas,
+            )
+            logger.info(
+                f"Stored {len(documents)} documents in collection '{collection_name}'"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Failed to store documents in ChromaDB collection '{collection_name}': {e}"
+            )
+            return
 
     def _ensure_collections_ready(self) -> None:
         """Ensure the backing collection exists."""

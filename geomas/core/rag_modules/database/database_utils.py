@@ -7,9 +7,8 @@ from typing import Optional, Sequence
 import logging
 import os
 from pathlib import Path
-
+from chromadb import Documents, EmbeddingFunction
 import chromadb
-from chromadb import EmbeddingFunction
 from chromadb.api.models import Collection
 from pydantic import BaseModel, Field
 
@@ -135,6 +134,34 @@ class ChromaDatabaseClient:
             self.client = client_cls(settings=settings)
         else:
             self.client = client_cls(persist_directory=str(storage_root))
+            
+    def get_or_create_chroma_collection(
+            self,
+            collection: str,
+            embedding_function: EmbeddingFunction[Documents] | None = None,
+    ) -> Collection:
+        """
+        Gets or creates a Chroma collection.
+
+        This method ensures a Chroma collection exists for storing and retrieving document data.
+        It prioritizes retrieving an existing collection by name. If a collection with the given name doesn't exist,
+        it creates a new one, configured with the specified embedding function and a default data loader.
+        This enables efficient storage and search of scientific documents.
+
+        Args:
+            collection (str): The name of the Chroma collection to retrieve or create.
+            embedding_function (EmbeddingFunction[Documents] | None, optional):
+            An optional embedding function to use for the collection.
+            If None, the default embedding function is used. Defaults to None.
+
+        Returns:
+            Collection: The Chroma collection.
+        """
+        return self.client.get_or_create_collection(
+            name=collection,
+            embedding_function=embedding_function,
+            # data_loader=DATA_LOADER,
+        )
 
     @staticmethod
     def _call_shutdown(target: object | None) -> bool:

@@ -58,7 +58,7 @@ async def worker():
                 settings_overrides["temperature"] = params["temperature"]
             print(f"Check folders...")
             include_global = False
-            reset_local_rag = False
+            reset_local_rag = True
 
 
             path = os.path.join(UPLOAD_ROOT, f"{chat_id}")
@@ -89,6 +89,7 @@ async def worker():
             try:
                 print(f"Processing message: {message}")
                 collection_targets = default_collection_targets(chat_id, paths=paths, include_global=include_global)
+                query_kwargs["scopes"] = collection_targets
                 with create_chat_session(
                     paths=paths,
                     chat_id=chat_id,
@@ -177,7 +178,7 @@ async def receive_file(chat_id: str = Form(...), filename: str = Form(...), file
         uploads_dir=f"./data/{chat_id}/uploads",
         local_rag_dir=f"./data/{chat_id}/.vector-store",
     )
-    collection_targets = default_collection_targets(chat_id, paths=paths, include_global=include_global)
+
     #paths["uploads_dir"] = Path(f"data/{chat_id}/uploads/")
     settings_overrides: dict[str, object] = {"temperature": 0.2}
 
@@ -185,7 +186,6 @@ async def receive_file(chat_id: str = Form(...), filename: str = Form(...), file
         paths=paths,
         chat_id=chat_id,
         settings=settings_overrides,
-        collection_targets=collection_targets,
         reset_local_rag=False,
     ) as api:
         print("Step 3/4: Ingesting uploads...")

@@ -9,9 +9,11 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from bs4 import BeautifulSoup
 from langchain_core.documents import Document
 
 from geomas.core.data.custom_dataloaders import LangChainDocumentLoader
+from geomas.core.rag_modules.parser.rag_parser import DocumentParser
 from geomas.core.rag_modules.steps.chunking import TextChunker
 
 logger = logging.getLogger(__name__)
@@ -33,7 +35,8 @@ class DataLoaderAdapter:
     MARKDOWN_SUFFIXES = {".md", ".markdown", ".mmd"}
     TEXT_SUFFIXES = {".txt"}
     JSON_SUFFIXES = {".json", ".jsonl"}
-    SUPPORTED_SUFFIXES = HTML_SUFFIXES | MARKDOWN_SUFFIXES | TEXT_SUFFIXES | JSON_SUFFIXES
+    IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif"}
+    SUPPORTED_SUFFIXES = HTML_SUFFIXES | MARKDOWN_SUFFIXES | TEXT_SUFFIXES | JSON_SUFFIXES | IMAGE_SUFFIXES
 
     def __init__(
         self,
@@ -58,7 +61,7 @@ class DataLoaderAdapter:
             self.allowed_suffixes = set(self.SUPPORTED_SUFFIXES)
         else:
             self.allowed_suffixes = {suffix.lower() for suffix in allowed_suffixes}
-        self._markdown_chunker: TextChunker | None = None
+        self._chunker = TextChunker(chunking_params=self.chunking_params)
 
     def load_and_transform(
         self,
@@ -68,7 +71,6 @@ class DataLoaderAdapter:
         loader_overrides: Mapping[str, object] | None = None,
     ) -> AdapterResult:
         """Load data from ``source`` and return parsed ``Document`` objects."""
-
         del loader_overrides  # Loader overrides are not used in the streamlined adapter.
 
         path = Path(source).expanduser().resolve()
@@ -116,14 +118,16 @@ class DataLoaderAdapter:
         fingerprint, last_modified, size_bytes = self._collect_file_metadata(path)
 
         if suffix in self.JSON_SUFFIXES:
-            documents = self._load_json_documents(path)
-        elif suffix in self.HTML_SUFFIXES:
-            documents, cleanup_paths = self._parse_textual_file(path, resolved_name, "html")
-        elif suffix in self.MARKDOWN_SUFFIXES | self.TEXT_SUFFIXES:
-            documents, cleanup_paths = self._parse_markdown_file(path, resolved_name)
+            entries = self._entries_from_json(path)
+        elif suffix in self.HTML_SUFFIXES | self.MARKDOWN_SUFFIXES | self.TEXT_SUFFIXES:
+            entries, cleanup_paths = self._entries_from_textual_file(
+                path, resolved_name, suffix
+            )
         else:
             logger.info("Skipping unsupported file '%s'", path)
             return [], []
+
+        documents = self._chunk_entries(entries, resolved_name)
 
         enriched = self._enrich_metadata(
             path,
@@ -163,112 +167,115 @@ class DataLoaderAdapter:
 
         return fingerprint, last_modified, size_bytes
 
-    def _load_json_documents(self, path: Path) -> list[Document]:
+    def _entries_from_json(self, path: Path) -> list[tuple[str, Mapping[str, object]]]:
         try:
             loader = LangChainDocumentLoader(path)
-            documents = list(loader.lazy_load())
+            raw_documents = list(loader.lazy_load())
         except Exception as exc:
             logger.error("Failed to load JSON document '%s': %s", path, exc)
             return []
-        return documents
 
-    def _parse_textual_file(
-        self,
-        path: Path,
-        document_name: str,
-        document_type: str,
-    ) -> tuple[list[Document], list[Path]]:
-        parser = self.parser
+        entries: list[tuple[str, Mapping[str, object]]] = []
+        for document in raw_documents:
+            metadata = dict(document.metadata or {})
+            metadata.setdefault("source", metadata.get("source_path") or str(path))
+            metadata.setdefault("source_path", str(path))
+            entries.append((str(document.page_content), metadata))
+
+        return entries
+
+    def _entries_from_textual_file(
+        self, path: Path, document_name: str, suffix: str
+    ) -> tuple[list[tuple[str, Mapping[str, object]]], list[Path]]:
         cleanup_paths: list[Path] = []
-        if parser is None:
-            logger.warning("Parser is not available; skipping '%s'", path)
-            return [], cleanup_paths
-
         raw_text = self._read_text(path)
         if raw_text is None:
             return [], cleanup_paths
 
+        processed_text = raw_text
+        if self.parser is not None:
+            try:
+                processed_text, _ = self.parser.preprocessing(
+                    document_name, path.parent, raw_text
+                )
+            except Exception as exc:
+                logger.warning("Failed to preprocess '%s': %s", path, exc)
+            else:
+                processed_path = path.parent / f"{document_name}_processed.html"
+                if processed_path.exists():
+                    cleanup_paths.append(processed_path)
+
+        normalized_text = self._normalize_text_content(processed_text, suffix, path)
+
+        entries = [(normalized_text, {"source_path": str(path)})]
+        return entries, cleanup_paths
+
+    @staticmethod
+    def _clean_text_value(content: str) -> str:
+        normalised = content.replace("\r\n", "\n").replace("\r", "\n")
         try:
-            preprocessed_text, _ = parser.preprocessing(document_name, path.parent, raw_text)
+            from geomas.core.rag_modules.convertation import pdf_to_json as converters
+
+            if hasattr(converters, "clean_text"):
+                placeholder = "<GEOMAS_NL>"
+                prepared = normalised.replace("\n", f" {placeholder} ")
+                cleaned = converters.clean_text(prepared)
+                return cleaned.replace(placeholder, "\n").strip()
+        except ModuleNotFoundError:
+            return normalised.strip()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.debug("Failed to apply converter clean_text: %s", exc)
+        return normalised.strip()
+
+    @staticmethod
+    def _html_to_text_content(source_path: Path) -> str | None:
+        try:
+            from geomas.core.rag_modules.convertation import pdf_to_json as converters
+        except ModuleNotFoundError:
+            return None
+
+        try:
+            return converters.html_to_text(str(source_path))
+        except Exception as exc:  # pragma: no cover - converter is optional
+            logger.debug("html_to_text failed for '%s': %s", source_path, exc)
+            return None
+
+    def _normalize_text_content(
+        self, content: str, suffix: str, source_path: Path
+    ) -> str:
+        try:
+            if suffix in self.HTML_SUFFIXES:
+                converter_text = self._html_to_text_content(source_path)
+                if converter_text:
+                    return converter_text
+                try:
+                    soup = BeautifulSoup(content, "html.parser")
+                    return soup.get_text(separator=" ")
+                except Exception:
+                    return content
+            return content
         except Exception as exc:
-            logger.error("Failed to preprocess '%s': %s", path, exc)
-            return [], cleanup_paths
+            logger.warning("Failed to normalise content for '%s': %s", source_path, exc)
+            return content
 
-        processed_path = path.parent / f"{document_name}_processed.html"
-        if processed_path.exists():
-            cleanup_paths.append(processed_path)
-
-        documents = self._invoke_parser(
-            parser,
-            preprocessed_text,
-            document_name,
-            document_type,
-            path,
-        )
-
-        return documents, cleanup_paths
-
-    def _parse_markdown_file(self, path: Path, document_name: str) -> tuple[list[Document], list[Path]]:
-        parser = self.parser
-        raw_text = self._read_text(path)
-        if raw_text is None:
-            return [], []
-
-        if parser is None:
-            documents = self._chunk_markdown(raw_text, document_name, path)
-            return documents, []
-
-        try:
-            preprocessed_text, _ = parser.preprocessing(document_name, path.parent, raw_text)
-        except Exception:
-            preprocessed_text = raw_text
-            cleanup_paths: list[Path] = []
-        else:
-            processed_path = path.parent / f"{document_name}_processed.html"
-            cleanup_paths = [processed_path] if processed_path.exists() else []
-
-        documents = self._invoke_parser(parser, preprocessed_text, document_name, "markdown", path)
-        return documents, cleanup_paths
-
-    def _invoke_parser(
-        self,
-        parser: DocumentParser,
-        raw_text: str,
-        document_name: str,
-        document_type: str,
-        path: Path,
+    def _chunk_entries(
+        self, entries: Sequence[tuple[str, Mapping[str, object]]], document_name: str
     ) -> list[Document]:
-        try:
-            documents = parser.parse(
-                raw_text,
-                document_name,
-                document_type,
-                source_path=str(path),
-            )
-        except TypeError:
-            documents = parser.parse(raw_text, document_name, document_type)
-        except Exception as exc:
-            logger.error("Parser failed for '%s': %s", path, exc)
-            return []
-        return list(documents)
-
-    def _chunk_markdown(self, raw_text: str, document_name: str, path: Path) -> list[Document]:
-        logger.info(
-            "Parser unavailable; chunking Markdown document '%s' using TextChunker fallback",
-            path,
-        )
-        try:
-            chunker = self._get_markdown_chunker()
-            documents = chunker.apply_chunking(raw_text, document_name, "markdown")
-        except Exception as exc:
-            logger.error("Failed to chunk Markdown document '%s': %s", path, exc)
-            return []
-        return list(documents)
-
-    def _get_markdown_chunker(self) -> TextChunker:
-        if self._markdown_chunker is None:
-            self._markdown_chunker = TextChunker(chunking_params=self.chunking_params)
-        return self._markdown_chunker
+        documents: list[Document] = []
+        for text, base_metadata in entries:
+            try:
+                chunks = self._chunker.apply_chunking(text, document_name, "markdown")
+            except Exception as exc:
+                logger.error("Failed to chunk '%s': %s", document_name, exc)
+                continue
+            for chunk in chunks:
+                cleaned = self._clean_text_value(chunk.page_content)
+                if not cleaned:
+                    continue
+                metadata = dict(chunk.metadata or {})
+                metadata.update(base_metadata or {})
+                documents.append(Document(page_content=cleaned, metadata=metadata))
+        return documents
 
     @staticmethod
     def _read_text(path: Path) -> str | None:
@@ -294,10 +301,16 @@ class DataLoaderAdapter:
         for index, document in enumerate(valid_documents):
             metadata = dict(document.metadata or {})
             existing_source = metadata.get("source")
-            if existing_source in {None, "", document_name}:
+            if existing_source in {
+                None,
+                "",
+                document_name,
+                f"{document_name}.pdf",
+            }:
                 metadata["source"] = str(source_path)
             else:
                 metadata["source"] = existing_source
+            metadata.setdefault("source_path", str(source_path))
             metadata["document_name"] = document_name
             metadata["chunk_index"] = index
             metadata["chunk_count"] = chunk_count
@@ -313,11 +326,21 @@ class DataLoaderAdapter:
 
 def format_text_context(
     text_context: Iterable[Sequence[object]],
+    limit: int | None = None,
 ) -> list[dict[str, object]]:
-    """Summarise raw ``text_context`` entries for presentation layers."""
+    """Summarise raw ``text_context`` entries for presentation layers.
+
+    Args:
+        text_context: Iterable of scored context tuples returned by
+            :class:`DatabaseRagPipeline`.
+        limit: Optional cap on the number of items to include in the formatted
+            output. When omitted, all entries are preserved.
+    """
     formatted: list[dict[str, object]] = []
 
     for index, entry in enumerate(text_context):
+        if limit is not None and len(formatted) >= limit:
+            break
         if not isinstance(entry, Sequence) or len(entry) < 4:
             continue
         doc_id, raw_text, metadata, score = entry[:4]
@@ -330,6 +353,9 @@ def format_text_context(
                 or str(doc_id),
                 "score": score,
                 "preview": str(raw_text).strip().replace("\n", " "),
+                "type": metadata_map.get("type", "text"),
+                "database_scope": metadata_map.get("scope"),
+                "source_path": metadata_map.get("source_path"),
             }
         )
     return formatted

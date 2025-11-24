@@ -3,13 +3,18 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
-import ollama
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, MutableMapping, Sequence
 
+import ollama
+
 from dotenv import load_dotenv
 
+from geomas.core.inference.chat_utils import (
+    SUPPORTED_CHAT_ROLES,
+    normalise_chat_messages,
+)
 from geomas.core.repository.rag_repository import RAGConfig, _deep_update
 
 logger = logging.getLogger(__name__)
@@ -17,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 class OllamaClient:
     """Chat-oriented client compatible with :class:`StandardRAGPipeline`."""
-    _SUPPORTED_ROLES = {"system", "user", "assistant"}
+    _SUPPORTED_ROLES = SUPPORTED_CHAT_ROLES
 
     def __init__(
         self,
@@ -51,38 +56,11 @@ class OllamaClient:
     def _normalise_messages(
         cls, messages: Sequence[Mapping[str, object]]
     ) -> list[MutableMapping[str, object]]:
-        normalised: list[MutableMapping[str, object]] = []
-        for index, message in enumerate(messages):
-            if not isinstance(message, Mapping):
-                raise TypeError(
-                    "Ollama messages must be mappings with 'role' and 'content' keys"
-                )
-
-            role_raw = message.get("role")
-            if not isinstance(role_raw, str):
-                raise ValueError(
-                    f"Message at position {index} is missing a textual role"
-                )
-
-            role = role_raw.strip().lower()
-            if role not in cls._SUPPORTED_ROLES:
-                raise ValueError(
-                    "Ollama messages must contain a role from 'system', 'user', or 'assistant'"
-                )
-
-            content = message.get("content")
-            if content is None:
-                raise ValueError(
-                    f"Message at position {index} is missing completion content"
-                )
-
-            normalised.append(
-                {
-                    "role": role,
-                    "content": str(content),
-                }
-            )
-        return normalised
+        return normalise_chat_messages(
+            messages,
+            provider_name="Ollama",
+            supported_roles=cls._SUPPORTED_ROLES,
+        )
 
     def generate(
         self,
@@ -244,6 +222,8 @@ def build_ollama_rag_config(
     global_rag_dir: Path,
     local_rag_dir: Path | None = None,
     settings: OllamaSettings | None = None,
+    embedding_model_name: str = "ViT-B-32",
+    checkpoint: str = "laion2b_s34b_b79k",
 ) -> RAGConfig:
     resolved_settings = settings or load_ollama_settings()
 
@@ -258,20 +238,23 @@ def build_ollama_rag_config(
         "parsing": {"enable_parser": False},
         "database": {
             "client_mode": "persistent",
-            "persistent_path": str(rag_dir),
+            "persist_directory": str(rag_dir),
             "collection_name": collection_name,
         },
-        "retrieval": {
+        "retrieval":  {
             "top_k": 5,
             "text_top_k": 5,
-            "embedding_model_name": "labse",
+            "embedding_model_name": embedding_model_name,
+            "checkpoint": checkpoint,
         },
         "ranking": {
             "use_llm_reranking": False,
             "chroma": {"enabled": True},
         },
         "vector_store": {
-            "client": {"persistent_path": str(rag_dir)},
+            "client": {
+                "persist_directory": str(rag_dir),
+            }
         },
         "inference": {
             "enable_remote_services": True,

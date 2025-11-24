@@ -1,34 +1,21 @@
 from __future__ import annotations
 
 import logging
-import math
+import re
 import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, List, Mapping, Sequence, Tuple
 
-from chromadb.utils import embedding_functions as chroma_embeddings
-
+from langchain_chroma import Chroma
+from langchain_chroma.vectorstores import cosine_similarity
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import LLM
 from langchain_core.prompts import PromptTemplate
 
+from geomas.core.rag_modules.steps.retriever import _normalise_relevance
+
 logger = logging.getLogger(__name__)
-
-
-def _load_embedding_function(
-    embedding_function_name: str,
-    *,
-    embedding_model_name: str | None = None,
-    embedding_function_kwargs: Mapping[str, Any] | None = None,
-) -> Any:
-    """Resolve a Chroma embedding function by name."""
-    embedding_cls = getattr(chroma_embeddings, embedding_function_name)
-
-    initialisation_kwargs: dict[str, Any] = dict(embedding_function_kwargs or {})
-    if embedding_model_name is not None and "model_name" not in initialisation_kwargs:
-        initialisation_kwargs["model_name"] = embedding_model_name
-
-    return embedding_cls(**initialisation_kwargs)
 
 
 @dataclass(slots=True)
@@ -46,38 +33,32 @@ class LengthReranker:
 
 
 class ChromaReranker:
-    """Rerank documents using Chroma-compatible embedding functions."""
-    _DEFAULT_FUNCTION = "SentenceTransformerEmbeddingFunction"
-
+    """Rerank documents using the shared multimodal embedding function."""
     def __init__(
         self,
         *,
         ranking_config: Mapping[str, Any] | None = None,
-        embedding_function: Any | None = None,
+        embedding_function: Embeddings | None = None,
+        vector_store: Chroma | None = None,
         fallback_reranker: LengthReranker | None = None,
+        collection_vector_stores: Mapping[str, Chroma] | None = None,
+        collection_embeddings: Mapping[str, Embeddings] | None = None,
     ) -> None:
-        self._overrides: Mapping[str, Any] = dict(ranking_config or {})
-        self._embedding_function_name = self._resolve_embedding_function_name()
-        self._embedding_model_name = self._resolve_override("embedding_model_name")
-        self._embedding_function_kwargs = self._resolve_embedding_kwargs()
+        self._embedding_function = embedding_function or (
+            vector_store.embeddings if vector_store is not None else None
+        )
         self._fallback = fallback_reranker or LengthReranker()
-        self._embedding_function = embedding_function
-
-        if self._embedding_function is None:
-            try:
-                self._embedding_function = _load_embedding_function(
-                    self._embedding_function_name,
-                    embedding_model_name=self._embedding_model_name,
-                    embedding_function_kwargs=self._embedding_function_kwargs,
-                )
-            except Exception as exc:  # pragma: no cover - exercised in tests
-                logger.warning(
-                    "Unable to initialise embedding function '%s'; falling back to"
-                    " length-based reranking",
-                    self._embedding_function_name,
-                    exc_info=exc,
-                )
-                self._embedding_function = None
+        self._vector_store = vector_store
+        self._collection_embeddings = {
+            str(key): value
+            for key, value in (collection_embeddings or {}).items()
+            if isinstance(key, str)
+        }
+        self._collection_vector_stores = {
+            str(key): store
+            for key, store in (collection_vector_stores or {}).items()
+            if isinstance(key, str)
+        }
 
     def rerank(self, query: str, documents: Sequence[Document]) -> list[Document]:
         if not documents:
@@ -87,31 +68,62 @@ class ChromaReranker:
         if not unique_documents:
             return []
 
-        if not self._embedding_function:
+        embedding_map = self._build_embedding_map(unique_documents)
+        if not embedding_map:
             logger.info(
                 "Embedding function unavailable; using length-based reranking"
             )
             return self._fallback.rerank(unique_documents)
 
-        try:
-            query_vector = self._embed_single(query)
-            document_vectors = self._embed_documents(unique_documents)
-            scores = [
-                self._cosine_similarity(query_vector, vector)
-                for vector in document_vectors
-            ]
-        except Exception as exc:
-            logger.warning(
-                "Failed to compute embedding similarities; using fallback reranker",
-                exc_info=exc,
-            )
+        scored_documents: list[tuple[int, Document, float]] = []
+        for embedding_fn, grouped in embedding_map.values():
+            try:
+                query_vector = self._embed_query_with_fn(embedding_fn, query)
+                if not query_vector:
+                    scored_documents.extend(
+                        (index, document, float("-inf"))
+                        for index, document in grouped
+                    )
+                    continue
+
+                vectorised_documents: list[tuple[int, Document, list[float]]] = []
+                for index, document in grouped:
+                    vector = self._embed_document_with_fn(document, embedding_fn)
+                    if vector:
+                        vectorised_documents.append((index, document, vector))
+                    else:
+                        scored_documents.append((index, document, float("-inf")))
+                if not vectorised_documents:
+                    continue
+
+                similarity = cosine_similarity(
+                    [vector for _, _, vector in vectorised_documents],
+                    [query_vector],
+                )
+                if hasattr(similarity, "__getitem__") and not isinstance(
+                    similarity, list
+                ):
+                    scores = similarity[:, 0].tolist()
+                else:
+                    try:
+                        first_row = similarity[0]
+                        scores = list(first_row)
+                    except Exception:  # pragma: no cover - defensive fallback
+                        scores = list(similarity) if similarity is not None else []
+            except Exception as exc:
+                logger.warning(
+                    "Failed to compute embedding similarities; using fallback reranker",
+                    exc_info=exc,
+                )
+                return self._fallback.rerank(unique_documents)
+
+            for position, (index, document, _) in enumerate(vectorised_documents):
+                score = scores[position] if position < len(scores) else float("-inf")
+                scored_documents.append((index, document, float(score)))
+
+        if not scored_documents:
             return self._fallback.rerank(unique_documents)
 
-        indexed_documents = list(enumerate(unique_documents))
-        scored_documents = [
-            (index, document, score)
-            for (index, document), score in zip(indexed_documents, scores)
-        ]
         scored_documents.sort(key=lambda item: (-item[2], item[0]))
         return [document for _, document, _ in scored_documents]
 
@@ -132,6 +144,79 @@ class ChromaReranker:
         content = document.page_content or ""
         metadata_repr = self._stringify_metadata(document.metadata)
         return f"{content}\n{metadata_repr}"
+
+    def _embed_query(self, query: str) -> list[float]:
+        return self._embed_query_with_fn(self._embedding_function, query)
+
+    def _embed_query_with_fn(
+        self, embedding_function: Embeddings | None, query: str
+    ) -> list[float]:
+        if embedding_function is None:
+            return []
+
+        if hasattr(embedding_function, "embed_query"):
+            return list(embedding_function.embed_query(query))
+
+        if hasattr(embedding_function, "embed_documents"):
+            embeddings = embedding_function.embed_documents([query])
+            return list(embeddings[0]) if embeddings else []
+
+        embeddings = embedding_function([query])
+        return list(embeddings[0]) if embeddings else []
+
+    def _embed_document(self, document: Document) -> list[float]:
+        return self._embed_document_with_fn(document, self._embedding_function)
+
+    def _embed_document_with_fn(
+        self, document: Document, embedding_function: Embeddings | None
+    ) -> list[float]:
+        if embedding_function is None:
+            return []
+
+        metadata = document.metadata if isinstance(document.metadata, Mapping) else {}
+        is_image = metadata.get("type") == "image"
+        source_path = metadata.get("source_path") or metadata.get("source")
+
+        if is_image and hasattr(embedding_function, "embed_image") and isinstance(
+            source_path, str
+        ):
+            embeddings = embedding_function.embed_image([source_path])
+            return list(embeddings[0]) if embeddings else []
+
+        if hasattr(embedding_function, "embed_documents"):
+            embeddings = embedding_function.embed_documents([document.page_content])
+            return list(embeddings[0]) if embeddings else []
+
+        if hasattr(embedding_function, "embed_query"):
+            return list(embedding_function.embed_query(document.page_content))
+
+        embeddings = embedding_function([document.page_content])
+        return list(embeddings[0]) if embeddings else []
+
+    def _embedding_for_document(self, document: Document) -> Embeddings | None:
+        metadata = document.metadata if isinstance(document.metadata, Mapping) else {}
+        scope = metadata.get("scope") or metadata.get("namespace")
+        if isinstance(scope, str):
+            if scope in self._collection_embeddings:
+                return self._collection_embeddings[scope]
+            scoped_store = self._collection_vector_stores.get(scope)
+            if scoped_store is not None and scoped_store.embeddings is not None:
+                return scoped_store.embeddings
+        return self._embedding_function
+
+    def _build_embedding_map(
+        self, documents: Sequence[Document]
+    ) -> dict[int, tuple[Embeddings, list[tuple[int, Document]]]]:
+        embedding_map: dict[int, tuple[Embeddings, list[tuple[int, Document]]]] = {}
+        for index, document in enumerate(documents):
+            embedding_fn = self._embedding_for_document(document)
+            if embedding_fn is None:
+                continue
+            key = id(embedding_fn)
+            if key not in embedding_map:
+                embedding_map[key] = (embedding_fn, [])
+            embedding_map[key][1].append((index, document))
+        return embedding_map
 
     @classmethod
     def _stringify_metadata(cls, metadata: Any) -> str:
@@ -155,104 +240,125 @@ class ChromaReranker:
             return [cls._normalise_metadata(item) for item in value]
         return value
 
-    def _resolve_embedding_function_name(self) -> str:
-        name = self._resolve_override(
-            "embedding_function_name",
-            fallback=self._resolve_override("embedding_function", fallback=None),
-        )
-        if not name:
-            return self._DEFAULT_FUNCTION
-        return str(name)
 
-    def _resolve_embedding_kwargs(self) -> Mapping[str, Any]:
-        overrides = self._resolve_override("embedding_function_kwargs", fallback={})
-        if isinstance(overrides, Mapping):
-            return dict(overrides)
-        logger.warning(
-            "Ignoring embedding_function_kwargs override with unexpected type %s",
-            type(overrides).__name__,
-        )
-        return {}
+def _score_from_metadata(metadata: Mapping[str, Any]) -> float:
+    for key in ("relevance_score", "normalized_score", "score", "similarity"):
+        if key in metadata:
+            try:
+                return float(metadata[key])
+            except (TypeError, ValueError):
+                continue
 
-    def _resolve_override(self, key: str, *, fallback: Any | None = None) -> Any:
-        alias_keys = {
-            "embedding_function_name": "function",
-            "embedding_model_name": "model_name",
-            "embedding_function_kwargs": "kwargs",
-        }
-        if key in self._overrides:
-            return self._overrides[key]
-        alias = alias_keys.get(key)
-        if alias and alias in self._overrides:
-            return self._overrides[alias]
-        return fallback
+    distance = metadata.get("distance")
+    normalised = _normalise_relevance(distance) if distance is not None else None
+    if normalised is not None:
+        return normalised
 
-    def _embed_single(self, text: str) -> list[float]:
-        embeddings = self._call_embedding_function([text], single=True)
-        return embeddings[0]
+    return float("nan")
 
-    def _embed_documents(self, documents: Sequence[Document]) -> list[list[float]]:
-        inputs = [document.page_content for document in documents]
-        return self._call_embedding_function(inputs, single=False)
 
-    def _call_embedding_function(
-        self, texts: Sequence[str], *, single: bool
-    ) -> list[list[float]]:
-        if not texts:
+def _extract_chunk_index(metadata: Mapping[str, Any] | None, doc_id: str | None) -> int | None:
+    candidates: list[object] = []
+    if isinstance(metadata, Mapping):
+        for key in ("chunk_index", "chunkId", "chunkNumber"):
+            if key in metadata:
+                candidates.append(metadata[key])
+    if doc_id:
+        matches = re.findall(r"chunk_(\d+)", str(doc_id))
+        if matches:
+            candidates.append(matches[-1])
+
+    for candidate in candidates:
+        try:
+            return int(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def build_scored_context(
+    raw_results: Sequence[Document] | Sequence[tuple[Document, float]] | Mapping[str, Any],
+    top_k: int,
+) -> list[tuple[str, int | None, str, dict, float]]:
+    """Normalise retrieval results into a scored context list."""
+
+    if isinstance(raw_results, Mapping):
+        documents = raw_results.get("documents", [[]])
+        metadatas = raw_results.get("metadatas", [[]])
+        ids = raw_results.get("ids", [[]])
+
+        candidate_docs = documents[0] if isinstance(documents, Sequence) and documents else []
+        candidate_metas = metadatas[0] if isinstance(metadatas, Sequence) and metadatas else []
+        candidate_ids = ids[0] if isinstance(ids, Sequence) and ids else []
+
+        limit = min(top_k, len(candidate_docs), len(candidate_metas), len(candidate_ids))
+        if limit <= 0:
             return []
 
-        embedding_function = self._embedding_function
-        raw_embeddings: Any
+        scores_row = raw_results.get("similarities") or raw_results.get("distances") or []
+        score_candidates = scores_row[0] if isinstance(scores_row, Sequence) and scores_row else []
 
-        if single and hasattr(embedding_function, "embed_query") and callable(
-            getattr(embedding_function, "embed_query")
-        ):
-            raw_embeddings = [embedding_function.embed_query(texts[0])]
-        elif (
-            not single
-            and hasattr(embedding_function, "embed_documents")
-            and callable(getattr(embedding_function, "embed_documents"))
-        ):
-            raw_embeddings = embedding_function.embed_documents(list(texts))
-        else:
-            raw_embeddings = embedding_function(list(texts))
+        scored_docs: list[tuple[str, int | None, str, dict, float]] = []
+        for index in range(limit):
+            doc_id = str(candidate_ids[index])
+            doc_text = candidate_docs[index]
+            metadata = (
+                candidate_metas[index] if isinstance(candidate_metas[index], Mapping) else {}
+            )
+            score_candidate = score_candidates[index] if index < len(score_candidates) else None
+            normalised = (
+                _normalise_relevance(score_candidate) if score_candidate is not None else None
+            )
+            if normalised is not None:
+                metadata.setdefault("relevance_score", normalised)
+                metadata.setdefault("normalized_score", normalised)
+            score = normalised if normalised is not None else float("nan")
+            scored_docs.append(
+                (
+                    doc_id,
+                    _extract_chunk_index(metadata, doc_id),
+                    doc_text,
+                    dict(metadata),
+                    score,
+                )
+            )
+        return scored_docs
 
-        if not isinstance(raw_embeddings, Sequence):
-            raise TypeError("Embedding function returned a non-sequence result")
+    scored_docs: list[tuple[str, int | None, str, dict, float]] = []
+    if not isinstance(raw_results, Sequence):
+        return scored_docs
 
-        embeddings_list = list(raw_embeddings)
-        if len(embeddings_list) != len(texts):
-            raise ValueError("Embedding output length mismatch")
+    if raw_results and isinstance(raw_results[0], tuple):
+        for document, score in list(raw_results)[:top_k]:
+            metadata = dict(document.metadata or {})
+            normalised = _normalise_relevance(score)
+            if normalised is not None:
+                metadata.setdefault("relevance_score", normalised)
+                metadata.setdefault("normalized_score", normalised)
+            scored_docs.append(
+                (
+                    document.id or "",
+                    _extract_chunk_index(document.metadata, document.id),
+                    document.page_content,
+                    metadata,
+                    normalised if normalised is not None else float("nan"),
+                )
+            )
+        return scored_docs
 
-        processed: list[list[float]] = []
-        for vector in embeddings_list:
-            if not isinstance(vector, Sequence):
-                raise TypeError("Embedding vector is not a sequence")
-            processed_vector = []
-            for value in vector:
-                try:
-                    processed_vector.append(float(value))
-                except (TypeError, ValueError) as exc:
-                    raise TypeError("Embedding value is not a number") from exc
-            processed.append(processed_vector)
-
-        return processed
-
-    @staticmethod
-    def _cosine_similarity(lhs: Sequence[float], rhs: Sequence[float]) -> float:
-        if len(lhs) != len(rhs):
-            raise ValueError("Embedding vectors must be of identical dimensions")
-
-        dot = sum(l * r for l, r in zip(lhs, rhs))
-        lhs_norm = math.sqrt(sum(value * value for value in lhs))
-        rhs_norm = math.sqrt(sum(value * value for value in rhs))
-        if lhs_norm == 0.0 or rhs_norm == 0.0:
-            return 0.0
-
-        similarity = dot / (lhs_norm * rhs_norm)
-        if not math.isfinite(similarity):
-            raise ValueError("Cosine similarity computation produced a NaN value")
-        return similarity
+    for document in list(raw_results)[:top_k]:
+        metadata = dict(document.metadata or {})
+        score = _score_from_metadata(metadata)
+        scored_docs.append(
+            (
+                document.id or "",
+                _extract_chunk_index(metadata, document.id),
+                document.page_content,
+                metadata,
+                score,
+            )
+        )
+    return scored_docs
 
 
 def _ranking_flag(
@@ -293,21 +399,15 @@ def _ranking_mapping(
 
 def _extract_chroma_settings(
     ranking_config: "RankingConfigTemplate" | Mapping[str, Any] | None,
-) -> tuple[bool, dict[str, Any]]:
+) -> bool:
     if ranking_config is None:
-        return False, {}
+        return False
 
     if hasattr(ranking_config, "chroma"):
         chroma_template = getattr(ranking_config, "chroma")
-        enabled = bool(getattr(chroma_template, "enabled", False))
-        overrides_method = getattr(chroma_template, "to_overrides", None)
-        overrides = (
-            overrides_method() if callable(overrides_method) else {}
-        )
-        return enabled, dict(overrides)
+        return bool(getattr(chroma_template, "enabled", False))
 
     if isinstance(ranking_config, Mapping):
-        overrides: dict[str, Any] = {}
         chroma_section = ranking_config.get("chroma")
         enabled = _ranking_flag(ranking_config, "use_chroma_reranking")
 
@@ -315,56 +415,30 @@ def _extract_chroma_settings(
             if "enabled" in chroma_section:
                 enabled = bool(chroma_section.get("enabled"))
 
-            function = (
-                chroma_section.get("function")
-                or chroma_section.get("embedding_function_name")
-                or chroma_section.get("embedding_function")
-            )
-            if function:
-                overrides["embedding_function_name"] = str(function)
-
-            model_name = (
-                chroma_section.get("model_name")
-                if "model_name" in chroma_section
-                else chroma_section.get("embedding_model_name")
-            )
-            if model_name is not None:
-                overrides["embedding_model_name"] = (
-                    None if model_name is None else str(model_name)
-                )
-
-            kwargs_value = (
-                chroma_section.get("kwargs")
-                if "kwargs" in chroma_section
-                else chroma_section.get("embedding_function_kwargs")
-            )
-            if isinstance(kwargs_value, Mapping):
-                overrides["embedding_function_kwargs"] = dict(kwargs_value)
-
-        return enabled, overrides
-
-    return False, {}
+        return enabled
+    return False
 
 
 def build_chroma_reranker(
     ranking_config: "RankingConfigTemplate" | Mapping[str, Any] | None,
     *,
-    embedding_function: Any | None = None,
+    embedding_function: Embeddings | None = None,
+    vector_store: Chroma | None = None,
     collection_name: str | None = None,
+    collection_vector_stores: Mapping[str, Chroma] | None = None,
+    collection_embeddings: Mapping[str, Embeddings] | None = None,
     logger: logging.Logger | None = None,
 ) -> ChromaReranker | None:
-    enabled, overrides = _extract_chroma_settings(ranking_config)
+    enabled = _extract_chroma_settings(ranking_config)
     if not enabled:
         return None
-
-    overrides = dict(overrides)
-    if collection_name and "collection_name" not in overrides:
-        overrides["collection_name"] = collection_name
-
     try:
         return ChromaReranker(
-            ranking_config=overrides,
+            ranking_config=ranking_config,
             embedding_function=embedding_function,
+            vector_store=vector_store,
+            collection_vector_stores=collection_vector_stores,
+            collection_embeddings=collection_embeddings,
         )
     except Exception as exc:  # pragma: no cover - defensive logging
         if logger is not None:

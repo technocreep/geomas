@@ -385,22 +385,12 @@ def process_visual_docs_with_embedding(
         logger.info(f"Start Embedding")
         documents= embedding_processor.process_geological_map(documents)
         
-        logger.info(f"Start store")
-
-        from geomas.core.rag_modules.database.chroma_db import ChromaDatabaseStore
-        store = ChromaDatabaseStore()
-        # Store visual documents in ChromaDB
-        store.store_visual_documents(
-            documents=documents['metadata'],
-            collection_name=f"{collection_name}_image",
-            embeddings=documents['image_embedding']
+        logger.info("Start store")
+        logger.warning(
+            "Direct visual document storage requires Chroma integration updates and is "
+            "currently disabled."
         )
-        store.store_visual_documents(
-            documents=documents['metadata'],
-            collection_name=f"{collection_name}_description",
-            embeddings=documents['description_embedding']
-        )
-        logger.info(f"✅ Successfully stored {len(documents['metadata'])} visual document descriptions!")
+        return
             
     except Exception as e:
         logger.error(f"Processing failed: {e}")
@@ -413,12 +403,17 @@ def describe_image(
         False,
         help="Generate detailed description"
     ),
-    output: str = typer.Option(
+    output: str | None = typer.Option(
         "",
         help="Optional: Save description to file"
     ),
 ):
-    """Generate textual description of a single image using Vision LLM."""
+    """Generate and optionally persist a textual description of an image.
+
+    Returns the generated description so programmatic callers can reuse the
+    text (for example, to embed it in a vector store). CLI invocations keep the
+    existing stdout behaviour.
+    """
     from pathlib import Path
     from geomas.core.vision.visual_data_processor import VisualDataProcessor
 
@@ -446,10 +441,12 @@ def describe_image(
             print("=" * 40)
         
         logger.info("✅ Description generated successfully!")
-        
+
     except Exception as e:
         logger.error(f"Failed to generate description: {e}")
         raise
+
+    return description
 
 
 @app.command()

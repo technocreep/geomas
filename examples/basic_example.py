@@ -1,261 +1,497 @@
 from __future__ import annotations
 
-import json
+import argparse
+import logging
 import os
-from dataclasses import dataclass, field
+import shutil
+import typer
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator, Mapping
 
 from dotenv import load_dotenv
 
+from geomas.api import rag as rag_module
 from geomas.api.rag import RagApi
-from geomas.core.rag_modules import rag_pipeline
+from geomas.core.logging.logger import get_logger
 from geomas.core.rag_modules.data_adapter import format_text_context
-from geomas.core.repository.rag_repository import RAGConfig
 
-# Custom corpora can be nested or symlinked beneath this folder for ingestion.
-EXAMPLE_DOCUMENTS = Path(__file__).resolve().parent / "data"
-DEFAULT_QUESTION = "Какие руды присутствуют на территории Рудное поле Светлое? Ответь со ссылкой на источник."
+logging.getLogger("torch.distributed.elastic.multiprocessing.redirects").setLevel(logging.ERROR)
+app = typer.Typer(help="GEOMAS")
+logger = get_logger()
+
+QUESTION_1 = (
+    "Подробно опиши морфологию рудных тел на территории `Светлое`."
+    "Ответь со ссылкой на источник. "
+    "В ответе укажи названия файлов."
+)
+
+QUESTION_2 = (
+    "Подробно опиши морфологию рудных тел на территории `Сенон`."
+    "Ответь со ссылкой на источник. "
+    "В ответе укажи названия файлов."
+)
+
+QUESTION_3 = (
+    "Подробно опиши морфологию рудных тел на территории `Сергеевское`."
+    "Ответь со ссылкой на источник. "
+    "В ответе укажи названия файлов."
+)
+
+DEFAULT_MODEL = "lmstudio-community/Meta-Llama-3-8B-Instruct"
 
 
-@dataclass(slots=True)
-class LMStudioSettings:
+@dataclass(frozen=True, slots=True)
+class LmStudioSettings:
     base_url: str
     model: str
-    temperature: float = 0.0
+    temperature: float = 0.2
     timeout: float | None = None
-    reranker_model: str | None = None
-    reranker_inference_kwargs: dict[str, object] = field(default_factory=dict)
-    use_llm_reranker: bool = True
-    use_chroma_reranker: bool = True
-    chroma_function: str | None = None
-    chroma_model: str | None = None
-    chroma_kwargs: dict[str, object] = field(default_factory=dict)
+    system_prompt: str | None = "Ответ должен быть на русском"
+
+    def with_overrides(self, overrides: Mapping[str, object]) -> "LmStudioSettings":
+        """Return a copy with supported ``overrides`` applied."""
+
+        if not overrides:
+            return self
+
+        valid_fields = {"base_url", "model", "temperature", "timeout", "system_prompt"}
+        unknown = sorted(set(overrides) - valid_fields)
+        if unknown:
+            raise ValueError(f"Unsupported LM Studio settings: {', '.join(unknown)}")
+
+        payload = {
+            "base_url": self.base_url,
+            "model": self.model,
+            "temperature": self.temperature,
+            "timeout": self.timeout,
+            "system_prompt": self.system_prompt,
+        }
+
+        for key, value in overrides.items():
+            if key == "temperature":
+                payload[key] = float(value)
+            elif key == "timeout":
+                payload[key] = None if value is None else float(value)
+            elif key == "base_url":
+                payload[key] = str(value).rstrip("/")
+            elif key == "model":
+                if not value:
+                    raise ValueError("LM Studio model must be a non-empty string")
+                payload[key] = str(value)
+            elif key == "system_prompt":
+                payload[key] = None if value in {None, ""} else str(value)
+
+        return LmStudioSettings(**payload)
+
+    def to_inference_params(self) -> dict[str, object]:
+        params: dict[str, object] = {
+            "provider": "lm_studio",
+            "base_url": self.base_url,
+            "model": self.model,
+            "temperature": self.temperature,
+        }
+        if self.timeout is not None:
+            params["timeout"] = self.timeout
+        if self.system_prompt:
+            params["system_prompt"] = self.system_prompt
+        return params
 
 
-def _env_flag(name: str, *, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
+def _read_float_env(name: str, *, default: float, env: Mapping[str, str]) -> float:
+    value = env.get(name)
+    if value is None or value.strip() == "":
         return default
-    normalised = value.strip().lower()
-    if normalised in {"1", "true", "yes", "on"}:
-        return True
-    if normalised in {"0", "false", "no", "off"}:
-        return False
-    raise RuntimeError(f"Environment variable {name} must be a boolean flag, got: {value!r}")
-
-
-def _json_env(name: str) -> dict[str, object]:
-    payload = os.getenv(name)
-    if not payload:
-        return {}
     try:
-        value = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Environment variable {name} must contain valid JSON") from exc
-    if not isinstance(value, dict):
-        raise RuntimeError(f"Environment variable {name} must contain a JSON object")
-    return value
+        return float(value)
+    except ValueError as exc:
+        raise RuntimeError(f"Environment variable {name} must be numeric") from exc
 
 
-def load_lmstudio_settings() -> LMStudioSettings:
-    load_dotenv()
-    base_url = os.getenv("LM_STUDIO_URL")
+def _read_optional_float_env(name: str, *, env: Mapping[str, str]) -> float | None:
+    value = env.get(name)
+    if value is None or value.strip() == "":
+        return None
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise RuntimeError(f"Environment variable {name} must be numeric") from exc
+
+
+def load_lmstudio_settings(
+    *,
+    use_dotenv: bool = True,
+    environ: Mapping[str, str] | None = None,
+) -> LmStudioSettings:
+    """Load :class:`LmStudioSettings` from environment variables."""
+
+    if use_dotenv:
+        try:
+            load_dotenv()
+        except Exception as exc:  # pragma: no cover - defensive load
+            logger.debug("Failed to load .env file: %s", exc)
+
+    env = dict(os.environ)
+    if environ is not None:
+        env.update(environ)
+
+    base_url = env.get("LM_STUDIO_URL") or env.get("LM_STUDIO_BASE_URL")
     if not base_url:
-        base_url = os.getenv("LM_STUDIO_BASE_URL")
-    if not base_url:
-        host = os.getenv("LM_STUDIO_HOST")
-        port = os.getenv("LM_STUDIO_PORT")
-        if host and port:
-            base_url = f"http://{host}:{port}"
-    model = os.getenv("LM_STUDIO_MODEL")
-    temperature = os.getenv("LM_STUDIO_TEMPERATURE")
-    timeout = os.getenv("LM_STUDIO_TIMEOUT")
-    reranker_model = os.getenv("LM_STUDIO_RERANKER_MODEL")
-    if not base_url:
-        raise RuntimeError("LM Studio base URL could not be determined from the environment")
+        host = env.get("LM_STUDIO_HOST", "localhost")
+        port = env.get("LM_STUDIO_PORT", "1234")
+        base_url = f"http://{host}:{port}"
+
+    model = env.get("LM_STUDIO_MODEL", DEFAULT_MODEL)
     if not model:
-        raise RuntimeError("LM Studio model must be configured via LM_STUDIO_MODEL")
-    reranker_inference_kwargs = _json_env("LM_STUDIO_RERANKER_INFERENCE_KWARGS")
-    use_llm_reranker = _env_flag("GEOMAS_USE_LLM_RERANKER", default=True)
-    use_chroma_reranker = _env_flag("GEOMAS_USE_CHROMA_RERANKER", default=True)
-    chroma_function = os.getenv("GEOMAS_CHROMA_RERANKER_FUNCTION")
-    chroma_model = os.getenv("GEOMAS_CHROMA_RERANKER_MODEL")
-    chroma_kwargs = _json_env("GEOMAS_CHROMA_RERANKER_KWARGS")
+        raise RuntimeError("LM_STUDIO_MODEL must be set to a non-empty string")
 
-    return LMStudioSettings(
+    temperature = _read_float_env("LM_STUDIO_TEMPERATURE", default=0.2, env=env)
+    timeout = _read_optional_float_env("LM_STUDIO_TIMEOUT", env=env)
+    system_prompt = env.get("LM_STUDIO_SYSTEM_PROMPT") or "Ответ должен быть на русском"
+
+    return LmStudioSettings(
         base_url=base_url.rstrip("/"),
         model=model,
         temperature=temperature,
         timeout=timeout,
-        reranker_model=reranker_model,
-        reranker_inference_kwargs=reranker_inference_kwargs,
-        use_llm_reranker=use_llm_reranker,
-        use_chroma_reranker=use_chroma_reranker,
-        chroma_function=chroma_function,
-        chroma_model=chroma_model,
-        chroma_kwargs=chroma_kwargs,
+        system_prompt=system_prompt,
     )
 
 
-def build_rag_config(
-    documents_dir: Path,
+def build_lmstudio_rag_config(
     *,
-    cache_dir: Path | None = None,
-    settings: LMStudioSettings | None = None,
-) -> RAGConfig:
-    """Return a :class:`RAGConfig` wired for the bundled demos.
-
-    The ranking section enables both rerankers by default. Override the knobs in
-    ``settings`` or via environment variables to match your deployment:
-
-    .. code-block:: python
-
-        ranking_overrides = {
-            "use_llm_reranking": True,
-            "llm_url": "http://localhost:1234/v1/rerank",
-            "inference_config": {"model": "reranker-model"},
-            "chroma": {
-                "enabled": True,
-                "function": "SentenceTransformerEmbeddingFunction",
-                "model_name": "all-MiniLM-L6-v2",
-            },
-        }
-
-    Retrieval keeps the global similarity threshold of 0.5 unless you supply an
-    override. This demo raises it to 0.85 so the console output focuses on
-    high-confidence matches while still demonstrating how to customise the
-    behaviour.
-
-    Export ``GEOMAS_USE_LLM_RERANKER`` or ``GEOMAS_USE_CHROMA_RERANKER`` with a
-    boolean value (``true``/``false``) to toggle each reranker without changing
-    the code. ``GEOMAS_CHROMA_RERANKER_FUNCTION``,
-    ``GEOMAS_CHROMA_RERANKER_MODEL``, and
-    ``GEOMAS_CHROMA_RERANKER_KWARGS`` customise the Chroma reranking pipeline.
-    ``LM_STUDIO_RERANKER_INFERENCE_KWARGS`` injects JSON overrides into the LLM
-    reranker connector.
-    """
+    chat_id: str | None = None,
+    global_rag_dir: Path,
+    local_rag_dir: Path | None = None,
+    settings: LmStudioSettings | None = None,
+) -> rag_module.RAGConfig:
     resolved_settings = settings or load_lmstudio_settings()
-    persistent_path = cache_dir or (documents_dir / ".vector-store")
-    inference_params = {
-        "base_url": resolved_settings.base_url,
-        "model": resolved_settings.model,
-        "temperature": resolved_settings.temperature,
-    }
-    if resolved_settings.timeout is not None:
-        inference_params["timeout"] = resolved_settings.timeout
-    reranker_model = resolved_settings.reranker_model or resolved_settings.model
-    ranking_params: dict[str, object] = {
-        "use_llm_reranking": resolved_settings.use_llm_reranker,
-        "chroma": {
-            "enabled": resolved_settings.use_chroma_reranker,
-        },
-    }
-    if reranker_model and resolved_settings.use_llm_reranker:
-        ranking_params["llm_url"] = reranker_model
-    if resolved_settings.reranker_inference_kwargs:
-        ranking_params["inference_config"] = dict(resolved_settings.reranker_inference_kwargs)
-    if resolved_settings.chroma_function:
-        ranking_params["chroma"]["function"] = resolved_settings.chroma_function
-    if resolved_settings.chroma_model is not None:
-        ranking_params["chroma"]["model_name"] = resolved_settings.chroma_model
-    if resolved_settings.chroma_kwargs:
-        ranking_params["chroma"]["kwargs"] = dict(resolved_settings.chroma_kwargs)
 
-    overrides = {
-        "parsing": {
-            "enable_parser": False,
-        },
+    if chat_id is not None:
+        collection_name = f"{chat_id}_local"
+        rag_dir = local_rag_dir
+    else:
+        collection_name = "global"
+        rag_dir = global_rag_dir
+
+    overrides: dict[str, object] = {
+        "parsing": {"enable_parser": False},
         "database": {
             "client_mode": "persistent",
-            "persistent_path": str(persistent_path),
-            "collection_name": "geomas",
+            "persist_directory": str(rag_dir),
+            "collection_name": collection_name,
         },
         "retrieval": {
             "top_k": 5,
             "text_top_k": 5,
-            "chunk_limit": 4,
-            "score_threshold": 0.85,  # default is 0.5; raise to emphasise top matches
-            "embedding_model_name": "labse",
+            "embedding_model_name": "ViT-B-32",
+            "checkpoint": "laion2b_s34b_b79k",
         },
         "ranking": {
-            **ranking_params,
+            "use_llm_reranking": False,
+            "chroma": {"enabled": True},
+        },
+        "vector_store": {
+            "persist_directory": str(rag_dir),
         },
         "inference": {
             "enable_remote_services": True,
-            "params": inference_params,
+            "provider": "lm_studio",
+            "params": resolved_settings.to_inference_params(),
         },
     }
-    return RAGConfig.from_mapping(overrides)
+    base_config = rag_module.RAGConfig.default().to_dict()
+    rag_module._deep_update(base_config, overrides)
+    return rag_module.RAGConfig.from_mapping(base_config)
 
 
-def run_basic_workflow(
-    question: str = DEFAULT_QUESTION,
+def default_collection_targets(chat_id: str, include_global: bool = True) -> list[str]:
+    targets: list[str] = []
+    if include_global:
+        targets.append("global")
+    targets.append(f"{chat_id}_local")
+    return targets
+
+
+def build_paths(
+    documents_dir: Path | str,
+    global_rag_dir: Path | str,
+    chat_dir: Path | str,
+    uploads_dir: Path | str,
+    local_rag_dir: Path | str,
+) -> dict[str, Path]:
+    document_dir = Path(documents_dir)
+    global_rag_dir = Path(global_rag_dir)
+    chat_dir = Path(chat_dir)
+    uploads_dir = Path(uploads_dir)
+    local_rag_dir = Path(local_rag_dir)
+    document_dir.mkdir(parents=True, exist_ok=True)
+    global_rag_dir.mkdir(parents=True, exist_ok=True)
+    chat_dir.mkdir(parents=True, exist_ok=True)
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    local_rag_dir.mkdir(parents=True, exist_ok=True)
+    return dict(
+        documents_dir=documents_dir,
+        global_rag_dir=global_rag_dir,
+        chat_dir=chat_dir,
+        uploads_dir=uploads_dir,
+        local_rag_dir=local_rag_dir,
+    )
+
+
+def build_chat_api(
     *,
-    documents_dir: Path = EXAMPLE_DOCUMENTS,
-    settings: LMStudioSettings | None = None,
-) -> dict[str, object]:
-    config = build_rag_config(documents_dir, settings=settings)
-    with RagApi(config=config) as api:
-        override_pipeline = rag_pipeline.create_standard_pipeline(config)
-        previous_pipeline = api.pipeline
-        api.pipeline = override_pipeline
-        api.is_initialized = False
-        query_kwargs = {
-            "text_top_k": 4,
-            "rerank_top_k": 3,
-        }
-        def _coerce_result(raw: object) -> object:
-            if hasattr(raw, "success"):
-                return raw
-            candidate = getattr(override_pipeline, "last_ingest_result", None)
-            if candidate is not None and hasattr(candidate, "success"):
-                return candidate
-            return rag_pipeline.ProcessingResult(success=bool(raw))
-        try:
-            try:
-                workflow = api.run_workflow(
-                    question,
-                    documents_path=documents_dir,
-                    query_kwargs=query_kwargs,
-                )
-            except TypeError as exc:
-                if "document_name" not in str(exc):
-                    raise
-                base_ingestion_raw = rag_pipeline.ingest_documents(override_pipeline, documents_dir)
-                base_ingestion = _coerce_result(base_ingestion_raw)
-                if bool(getattr(base_ingestion, "success", base_ingestion)):
-                    api.is_initialized = True
-                response = api.ask_question(question, **query_kwargs)
-                workflow = {
-                    "base_ingestion": base_ingestion,
-                    "uploaded_ingestions": [],
-                    "response": response,
-                }
-            return {
-                "question": question,
-                "ingestion": workflow.get("base_ingestion"),
-                "response": workflow["response"],
-            }
-        finally:
-            if previous_pipeline is not None and previous_pipeline is not override_pipeline:
-                try:
-                    previous_pipeline.close()
-                except Exception:
-                    pass
+    local_rag_dir: Path | str | None = None,
+    global_rag_dir: Path | str,
+    chat_id: str | None = None,
+    settings_overrides: Mapping[str, object] | LmStudioSettings | None = None,
+) -> RagApi:
+    settings = load_lmstudio_settings()
+    if settings_overrides is not None:
+        settings = settings.with_overrides(settings_overrides)
+    config = build_lmstudio_rag_config(
+        chat_id=chat_id,
+        global_rag_dir=global_rag_dir,
+        local_rag_dir=local_rag_dir,
+        settings=settings,
+    )
+    return RagApi(config=config)
+
+
+def initialize_global_rag(
+    *,
+    paths: dict[str, Path],
+    settings: Mapping[str, object] | LmStudioSettings | None = None,
+    describe_images: bool = False,
+) -> None:
+    logger.info("Step 1/4: preparing shared corpus at %s", paths.get("global_rag_dir"))
+    if not os.listdir(paths.get("global_rag_dir")):
+        with build_chat_api(
+            global_rag_dir=paths.get("global_rag_dir"),
+            settings_overrides=settings,
+        ) as api:
+            api.initialize_pipeline(
+                paths.get("documents_dir"),
+                describe_images=describe_images,
+            )
+            api.close()
+
+
+@contextmanager
+def create_chat_session(
+    *,
+    paths: dict[str, Path],
+    chat_id: str,
+    reset_local_rag: bool = False,
+    settings: Mapping[str, object] | LmStudioSettings | None = None,
+    describe_images: bool = False,
+) -> Iterator[RagApi]:
+    if reset_local_rag:
+        for entry in list(paths.get("local_rag_dir").iterdir()):
+            if entry.is_file():
+                os.remove(entry)
+            elif entry.is_dir():
+                shutil.rmtree(entry)
+    logger.info(
+        "Step 2/4: preparing chat %s RAG in %s (uploads at %s)",
+        chat_id,
+        paths.get("local_rag_dir"),
+        paths.get("uploads_dir"),
+    )
+    with build_chat_api(
+        local_rag_dir=paths.get("local_rag_dir"),
+        global_rag_dir=paths.get("global_rag_dir"),
+        chat_id=chat_id,
+        settings_overrides=settings,
+    ) as api:
+        api.initialize_pipeline(
+            paths.get("uploads_dir"),
+            describe_images=describe_images,
+        )
+        yield api
+
+
+def ingest_local_documents(
+    api: RagApi,
+    *,
+    paths: Mapping[str, Path] | object,
+    describe_images: bool = False,
+) -> None:
+    """Ingest chat uploads, optionally generating descriptions for images."""
+
+    logger.info("Preparing chat-local vector store at %s", paths.get("local_rag_dir"))
+    api.initialize_pipeline(
+        paths.get("uploads_dir"),
+        api.config.database.get("collection_name"),
+        describe_images=describe_images,
+    )
+
+
+def answer_with_combined_context(
+    api: RagApi,
+    question: str,
+    *,
+    chat_id: str,
+    query_kwargs: Mapping[str, object] | None = None,
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    logger.info(
+        "Step 4/4: querying combined context for chat %s and question: %s",
+        chat_id,
+        question,
+    )
+    payload = dict(query_kwargs or {})
+    response = api.ask_question(question, **payload)
+    raw_context = response.get("text_context", [])
+    formatted_rows = format_text_context(raw_context)
+    return response, formatted_rows
+
+
+def show_results(
+    response: dict[str, object],
+    context_rows: list[dict[str, object]]
+) -> None:
+    logger.info(f"Answer: {response.get('answer')}")
+    text_rows = [row for row in context_rows if row.get("type") != "image"]
+    image_rows = [row for row in context_rows if row.get("type") == "image"]
+
+    if text_rows:
+        logger.info("\nContext snippets:")
+        for entry in text_rows:
+            score = entry.get("score")
+            if isinstance(score, (int, float)):
+                score_display = f"{float(score):.3f}"
+            else:
+                score_display = str(score)
+            scope = entry.get("database_scope")
+            scope_suffix = f", scope={scope}" if scope else ""
+            logger.info(f"- {entry.get('document')} (score={score_display}{scope_suffix})")
+            logger.info(f"  {entry.get('preview')}")
+
+    if image_rows:
+        logger.info("\nImage matches:")
+        for entry in image_rows:
+            score = entry.get("score")
+            label = entry.get("document")
+            path = entry.get("source_path") or "(inline)"
+            score_display = f"{float(score):.3f}" if isinstance(score, (int, float)) else str(score)
+            logger.info(f"- {label} [{score_display}] -> {path}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--chat-id", default="demo-chat", help="Name for the chat-local collection")
+    parser.add_argument("--documents-dir", default="./data/global/uploads", help="Shared corpus location")
+    parser.add_argument(
+        "--global-rag-dir",
+        default="./data/global/.vector-store",
+        help="Persistent directory for the shared Chroma database",
+    )
+    parser.add_argument("--uploads-dir", default=None, help="Directory containing chat uploads")
+    parser.add_argument(
+        "--local-rag-dir",
+        default=None,
+        help="Persistent directory for the chat-local Chroma database",
+    )
+    parser.add_argument("--lm-studio-host", default="localhost", help="LM Studio host (matches Ollama example comments)")
+    parser.add_argument("--lm-studio-port", default="1234", help="LM Studio port")
+    parser.add_argument(
+        "--lm-studio-model",
+        default=DEFAULT_MODEL,
+        help="LM Studio model identifier (mirrors the Ollama example structure)",
+    )
+    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature for LM Studio completions")
+    parser.add_argument("--system-prompt", default="Ответ должен быть на русском", help="System prompt passed to LM Studio")
+    parser.add_argument("--include-global", action="store_true", help="Search both global and chat-local scopes")
+    parser.add_argument("--reset-local-rag", action="store_true", help="Clear chat-local vector store before ingesting")
+    parser.add_argument(
+        "--describe-images",
+        action="store_true",
+        help="Enable image-description ingestion for both global and chat uploads",
+    )
+    return parser.parse_args()
 
 
 def main() -> None:
-    result = run_basic_workflow()
-    response = result["response"]
-    print(f"Question: {result['question']}")
-    print(f"Answer: {response.get('answer') or 'No answer returned.'}")
-    print("\nContext snippets:")
-    for entry in format_text_context(response.get("text_context", [])):
-        similarity = float(entry["score"])
-        print(f"- {entry['document']} (similarity={similarity:.3f})")
-        print(f"  {entry['preview']}")
+    args = parse_args()
+    chat_id = args.chat_id
+    include_global = args.include_global
+    reset_local_rag = args.reset_local_rag
+
+    uploads_dir = args.uploads_dir or f"./data/{chat_id}/uploads"
+    local_rag_dir = args.local_rag_dir or f"./data/{chat_id}/.vector-store"
+    paths = build_paths(
+        documents_dir=args.documents_dir,
+        global_rag_dir=args.global_rag_dir,
+        chat_dir=f"./data/{chat_id}",
+        uploads_dir=uploads_dir,
+        local_rag_dir=local_rag_dir,
+    )
+
+    settings_overrides: dict[str, object] = {
+        "base_url": f"http://{args.lm_studio_host}:{args.lm_studio_port}",
+        "model": args.lm_studio_model,
+        "temperature": args.temperature,
+        "system_prompt": args.system_prompt,
+    }
+
+    query_kwargs: dict[str, object] = {
+        "text_top_k": 5,
+        "rerank_top_k": 5,
+    }
+    collection_targets = default_collection_targets(chat_id, include_global=include_global)
+    query_kwargs["scopes"] = collection_targets
+
+    logger.info("Step 1/4: Initialising shared corpus...")
+    initialize_global_rag(paths=paths, settings=settings_overrides, describe_images=args.describe_images)
+    logger.info("Step 1/4 complete: shared corpus initialised.")
+
+    logger.info(f"Creating new chat: {chat_id}")
+    logger.info("Step 2/4: Creating chat session...")
+    logger.info(f"Databases: {collection_targets}")
+    with create_chat_session(
+        paths=paths,
+        chat_id=chat_id,
+        settings=settings_overrides,
+        reset_local_rag=reset_local_rag,
+        describe_images=args.describe_images,
+    ) as api:
+        logger.info("Step 3/4: Ingesting uploads...")
+        ingest_local_documents(
+            api,
+            paths=paths,
+            describe_images=args.describe_images,
+        )
+        logger.info("Step 3/4 complete.")
+
+        logger.info("Step 4/4: Querying combined context... [1]")
+        response, context_rows = answer_with_combined_context(
+            api,
+            QUESTION_1,
+            chat_id=chat_id,
+            query_kwargs=query_kwargs,
+        )
+        show_results(response, context_rows)
+
+        logger.info("Step 4/4: Querying combined context... [2]")
+        response, context_rows = answer_with_combined_context(
+            api,
+            QUESTION_2,
+            chat_id=chat_id,
+            query_kwargs=query_kwargs,
+        )
+        show_results(response, context_rows)
+
+        logger.info("Step 4/4: Querying combined context... [3]")
+        response, context_rows = answer_with_combined_context(
+            api,
+            QUESTION_3,
+            chat_id=chat_id,
+            query_kwargs=query_kwargs,
+        )
+        show_results(response, context_rows)
+        api.close()
 
 
 if __name__ == "__main__":
     main()
-

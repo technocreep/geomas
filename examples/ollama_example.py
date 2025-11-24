@@ -1,22 +1,23 @@
 from __future__ import annotations
 
-import os
 import logging
+import os
 import shutil
-from collections.abc import Iterator, Mapping
+import typer
 from contextlib import contextmanager
+
 from pathlib import Path
+from typing import Iterator, Mapping
 
 from geomas.api import rag as rag_module
 from geomas.api.rag import RagApi
+from geomas.core.logging.logger import get_logger
 from geomas.core.inference.ollama_client import (
     OllamaSettings,
     build_ollama_rag_config,
     load_ollama_settings,
 )
 from geomas.core.rag_modules.data_adapter import format_text_context
-from geomas.cli import process_visual_docs_with_embedding
-
 
 QUESTION_1 = (
     "Подробно опиши морфологию рудных тел на территории `Светлое`."
@@ -30,29 +31,28 @@ QUESTION_2 = (
     "В ответе укажи названия файлов."
 )
 
-
 QUESTION_3 = (
     "Подробно опиши морфологию рудных тел на территории `Сергеевское`."
     "Ответь со ссылкой на источник. "
     "В ответе укажи названия файлов."
 )
 
-
-logger = logging.getLogger(__name__)
+logging.getLogger("torch.distributed.elastic.multiprocessing.redirects").setLevel(logging.ERROR)
+app = typer.Typer(help="GEOMAS")
+logger = get_logger()
 
 build_rag_config = rag_module.build_ollama_rag_config
 
 
 def default_collection_targets(
     chat_id: str,
-    *,
     paths: dict[str, Path],
     include_global: bool = True
 ) -> dict[str, str]:
     targets: dict = {}
     if include_global:
-        targets["global"] = paths.get("documents_dir")
-    targets[f"{chat_id}_local"] = paths.get("uploads_dir")
+        targets["global"] = paths.get("global_rag_dir")
+    targets[f"{chat_id}_local"] = paths.get("local_rag_dir")
     return targets
 
 
@@ -84,9 +84,9 @@ def build_paths(
 
 def build_chat_api(
     *,
-    local_rag_dir: Path | str  | None = None,
+    local_rag_dir: Path | str | None = None,
     global_rag_dir: Path | str,
-    chat_id: str  | None = None,
+    chat_id: str | None = None,
     settings_overrides: Mapping[str, object] | OllamaSettings | None = None,
 ) -> RagApi:
     settings = load_ollama_settings()
@@ -113,11 +113,6 @@ def initialize_global_rag(
             settings_overrides=settings,
         ) as api:
             api.initialize_pipeline(paths.get("documents_dir"))
-            process_visual_docs_with_embedding(
-                str(paths.get("documents_dir")),
-                collection_name="global",
-                detailed=False,
-            )
             api.close()
 
 
@@ -126,9 +121,8 @@ def create_chat_session(
     *,
     paths: dict[str, Path],
     chat_id: str,
-    reset_local_rag: bool = False,
+    reset_local_rag: bool = True,
     settings: Mapping[str, object] | OllamaSettings | None = None,
-    collection_targets: dict[str, str] | None = None,
 ) -> Iterator[RagApi]:
     if reset_local_rag:
         for entry in list(paths.get("local_rag_dir").iterdir()):
@@ -148,18 +142,26 @@ def create_chat_session(
         chat_id=chat_id,
         settings_overrides=settings,
     ) as api:
-        for target, path in collection_targets.items():
-            api.initialize_pipeline(str(path), target)
-        yield api
+        try:
+            api.initialize_pipeline(paths.get("uploads_dir"))
+            yield api
+        finally:
+            api.close()
 
 
 def ingest_local_documents(
     api: RagApi,
     *,
     paths: Mapping[str, Path] | object,
+    describe_images: bool = True,
 ) -> None:
+    """Ingest chat uploads, optionally generating descriptions for images."""
     logger.info("Preparing chat-local vector store at %s", paths.get("local_rag_dir"))
-    api.initialize_pipeline(paths.get("uploads_dir"), api.config.database.get("collection_name"))
+    api.initialize_pipeline(
+        paths.get("uploads_dir"),
+        api.config.database.get("collection_name"),
+        describe_images=describe_images,
+    )
 
 
 def answer_with_combined_context(
@@ -180,33 +182,49 @@ def answer_with_combined_context(
     formatted_rows = format_text_context(raw_context)
     return response, formatted_rows
 
+
 def show_results(
     response: dict[str, object],
     context_rows: list[dict[str, object]]
 ) -> None:
-    print(f"Answer: {response.get('answer') or 'No answer returned.'}")
-    # Retrieval debug
+    logger.info(f"Answer: {response.get('answer')}")
+    text_rows = [row for row in context_rows if row.get("type") != "image"]
+    image_rows = [row for row in context_rows if row.get("type") == "image"]
 
-    # print("Context snippets:")
-    # for entry in context_rows:
-    #     score = entry.get("score")
-    #     if isinstance(score, (int, float)):
-    #         score_display = f"{float(score):.3f}"
-    #     else:
-    #         score_display = str(score)
-    #     scope = entry.get("database_scope")
-    #     scope_suffix = f", scope={scope}" if scope else ""
-    #     print(f"- {entry.get('document')} (score={score_display}{scope_suffix})")
-    #     print(f"  {entry.get('preview')}")
+    if text_rows:
+        logger.info("\nContext snippets:")
+        for entry in text_rows:
+            score = entry.get("score")
+            if isinstance(score, (int, float)):
+                score_display = f"{float(score):.3f}"
+            else:
+                score_display = str(score)
+            scope = entry.get("database_scope")
+            scope_suffix = f", scope={scope}" if scope else ""
+            logger.info(f"- {entry.get('document')} (score={score_display}{scope_suffix})")
+            logger.info(f"  {entry.get('preview')}")
+
+    if image_rows:
+        logger.info("\nImage matches:")
+        for entry in image_rows:
+            score = entry.get("score")
+            label = entry.get("document")
+            path = entry.get("source_path") or "(inline)"
+            score_display = f"{float(score):.3f}" if isinstance(score, (int, float)) else str(score)
+            logger.info(f"- {label} [{score_display}] -> {path}")
 
 
 def main() -> None:
-    query_kwargs = {"text_top_k": 4, "rerank_top_k": 3}
-    settings_overrides: dict[str, object] = {"temperature": 0.2}
+    query_kwargs: dict[str, int] = {
+        "top_k": 5,
+        "query_images": False,
+    }
+    settings_overrides: dict[str, object] = {"temperature": 0.1}
 
     chat_id = "demo-chat"
     include_global = True
-    reset_local_rag = False
+    reset_local_rag = True
+    describe_images = True
     paths = build_paths(
         documents_dir="./data/global/uploads",
         global_rag_dir="./data/global/.vector-store",
@@ -214,29 +232,30 @@ def main() -> None:
         uploads_dir=f"./data/{chat_id}/uploads",
         local_rag_dir=f"./data/{chat_id}/.vector-store",
     )
-    print("Step 1/4: Initialising shared corpus...")
+    logger.info("Step 1/4: Initialising shared corpus...")
     initialize_global_rag(paths=paths)
-    print("Step 1/4 complete: shared corpus initialised.")
+    logger.info("Step 1/4 complete: shared corpus initialised.")
 
-    print(f"Creating new chat: {chat_id}")
-    print("Step 2/4: Creating chat session...")
+    logger.info(f"Creating new chat: {chat_id}")
+    logger.info("Step 2/4: Creating chat session...")
     collection_targets = default_collection_targets(chat_id, paths=paths, include_global=include_global)
-    print(f"Databases: {collection_targets}")
+    query_kwargs["scopes"] = collection_targets
+    logger.info(f"Databases: {query_kwargs['scopes']}")
     with create_chat_session(
         paths=paths,
         chat_id=chat_id,
         settings=settings_overrides,
-        collection_targets=collection_targets,
         reset_local_rag=reset_local_rag,
     ) as api:
-        print("Step 3/4: Ingesting uploads...")
+        logger.info("Step 3/4: Ingesting uploads...")
         ingest_local_documents(
             api,
             paths=paths,
+            describe_images=describe_images,
         )
-        print(f"Step 3/4 complete.")
+        logger.info(f"Step 3/4 complete.")
 
-        print("Step 4/4: Querying combined context... [1]")
+        logger.info("Step 4/4: Querying combined context... [1]")
         question = QUESTION_1
         response, context_rows = answer_with_combined_context(
             api,
@@ -246,7 +265,7 @@ def main() -> None:
         )
         show_results(response, context_rows)
 
-        print("Step 4/4: Querying combined context... [2]")
+        logger.info("Step 4/4: Querying combined context... [2]")
         question = QUESTION_2
         response, context_rows = answer_with_combined_context(
             api,
@@ -256,7 +275,7 @@ def main() -> None:
         )
         show_results(response, context_rows)
 
-        print("Step 4/4: Querying combined context... [3]")
+        logger.info("Step 4/4: Querying combined context... [3]")
         question = QUESTION_3
         response, context_rows = answer_with_combined_context(
             api,
@@ -265,12 +284,12 @@ def main() -> None:
             query_kwargs=query_kwargs,
         )
         show_results(response, context_rows)
-        api.close()
 
     previous_chat_id = chat_id
     chat_id = "sfasfpkasfka"
     include_global = True
-    reset_local_rag = False
+    reset_local_rag = True
+    describe_images = True
     paths = build_paths(
         documents_dir="./data/global/uploads",
         global_rag_dir="./data/global/.vector-store",
@@ -278,26 +297,27 @@ def main() -> None:
         uploads_dir=Path(f"./data/{chat_id}/uploads"),
         local_rag_dir=Path(f"./data/{chat_id}/.vector-store"),
     )
-    print(f"Creating new chat: {chat_id}")
+    logger.info(f"Creating new chat: {chat_id}")
 
     collection_targets = default_collection_targets(chat_id, paths=paths, include_global=include_global)
     collection_targets[f"{previous_chat_id}"] = f"./data/{previous_chat_id}/uploads"
-
+    query_kwargs["scopes"] = collection_targets
+    logger.info(f"Databases: {query_kwargs['scopes']}")
     with create_chat_session(
         paths=paths,
         chat_id=chat_id,
         settings=settings_overrides,
-        collection_targets=collection_targets,
         reset_local_rag=reset_local_rag,
     ) as api:
-        print("Step 3/4: Ingesting uploads...")
+        logger.info("Step 3/4: Ingesting uploads...")
         ingest_local_documents(
             api,
             paths=paths,
+            describe_images=describe_images,
         )
-        print(f"Step 3/4 complete.")
+        logger.info(f"Step 3/4 complete.")
 
-        print("Step 4/4: Querying combined context... [New chat session]")
+        logger.info("Step 4/4: Querying combined context... [New chat session]")
         question = QUESTION_1
         response, context_rows = answer_with_combined_context(
             api,
@@ -306,7 +326,7 @@ def main() -> None:
             query_kwargs=query_kwargs,
         )
         show_results(response, context_rows)
-        api.close()
+
 
 if __name__ == "__main__":
     main()

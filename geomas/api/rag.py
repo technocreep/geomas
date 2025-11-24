@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-import os
 import logging
-import inspect
 from pathlib import Path
 from threading import RLock
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional
+from langchain_chroma import Chroma
+from langchain_core.embeddings import Embeddings
 
-from geomas.core.rag_modules import rag_pipeline
-from geomas.core.rag_modules.database.chroma_db import ProcessingResult
 from geomas.core.rag_modules.rag_pipeline import StandardRAGPipeline
+from geomas.core.inference import ollama_client
 from geomas.core.repository.rag_repository import (
     RAGConfig,
     RAGConfigTemplate,
     _deep_update,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +36,11 @@ def build_ollama_rag_config(
     local_rag_dir: Path | str | None = None,
 ):
     """Backward-compatible wrapper around the core Ollama config builder."""
-
-    from geomas.core.inference import ollama_client as _ollama_client
-
     base_settings = settings
     if isinstance(base_settings, Mapping):
-        base_settings = _ollama_client.load_ollama_settings().with_overrides(base_settings)
+        base_settings = ollama_client.load_ollama_settings().with_overrides(base_settings)
     elif base_settings is None:
-        base_settings = _ollama_client.load_ollama_settings()
+        base_settings = ollama_client.load_ollama_settings()
 
     documents_path: Path | None = None
     if documents_dir is not None:
@@ -60,10 +57,9 @@ def build_ollama_rag_config(
     resolved_local = (
         Path(local_source).expanduser().resolve() if local_source is not None else None
     )
-
     resolved_chat = chat_id.strip() if isinstance(chat_id, str) and chat_id.strip() else None
 
-    build_core = _ollama_client.build_ollama_rag_config
+    build_core = ollama_client.build_ollama_rag_config
 
     cache_value = cache_dir
     local_cache_value = local_cache_dir
@@ -72,7 +68,7 @@ def build_ollama_rag_config(
         documents_path = resolved_global
 
     try:
-        config = build_core(  # type: ignore[misc]
+        config = build_core(
             documents_path,
             cache_dir=Path(cache_value).expanduser().resolve() if cache_value is not None else None,
             local_cache_dir=(
@@ -89,7 +85,6 @@ def build_ollama_rag_config(
             local_rag_dir=resolved_local,
             settings=base_settings,
         )
-
     if isinstance(config, RAGConfig):
         overrides = config.to_dict()
         database_overrides = overrides.setdefault("database", {})
@@ -103,88 +98,7 @@ def build_ollama_rag_config(
             vector_overrides.pop("local_client", None)
             database_overrides.pop("local_collection_name", None)
         config = RAGConfig.from_mapping(overrides)
-
     return config
-
-
-def run_ollama_workflow(
-    question: str,
-    *,
-    documents_dir: Path | str,
-    uploaded_documents: Sequence[Path | str] | None = None,
-    cache_dir: Path | str | None = None,
-    local_cache_dir: Path | str | None = None,
-    settings: Mapping[str, object] | object | None = None,
-    chat_id: str | None = None,
-    global_rag_dir: Path | str | None = None,
-    local_rag_dir: Path | str | None = None,
-) -> Dict[str, Any]:
-    """Execute the Ollama demo workflow while preserving the legacy API."""
-
-    if not question:
-        raise ValueError("Question must be a non-empty string")
-
-    documents_path = Path(documents_dir).expanduser().resolve()
-    uploads = [Path(entry).expanduser().resolve() for entry in (uploaded_documents or [])]
-
-    config = build_ollama_rag_config(
-        documents_path,
-        cache_dir=cache_dir,
-        local_cache_dir=local_cache_dir,
-        settings=settings,
-        chat_id=chat_id,
-        global_rag_dir=global_rag_dir,
-        local_rag_dir=local_rag_dir,
-    )
-
-    from geomas.core.rag_modules import rag_pipeline
-
-    override_pipeline = rag_pipeline.create_standard_pipeline(config)
-
-    query_kwargs: Dict[str, Any] = {"text_top_k": 4, "rerank_top_k": 3}
-
-    with RagApi(config=config) as api:
-        previous_pipeline = api.pipeline
-        api.pipeline = override_pipeline
-        api.is_initialized = False
-
-        run_workflow = getattr(api, "run_workflow")
-        try:
-            signature = inspect.signature(run_workflow)
-            supports_documents_dir = "documents_dir" in signature.parameters
-        except (ValueError, TypeError):
-            supports_documents_dir = True
-
-        workflow_kwargs: Dict[str, Any] = {
-            "uploaded_documents": uploads or None,
-            "query_kwargs": query_kwargs,
-        }
-        if supports_documents_dir:
-            workflow_kwargs["documents_dir"] = documents_path
-        else:
-            workflow_kwargs["documents_path"] = documents_path
-
-        try:
-            workflow = run_workflow(question, **workflow_kwargs)
-        finally:
-            if previous_pipeline is not None and previous_pipeline is not override_pipeline:
-                try:
-                    previous_pipeline.close()
-                except Exception as exc:
-                    logger.debug("Failed to close previous pipeline after workflow: %s", exc)
-
-    response = workflow.get("response", {}) if isinstance(workflow, Mapping) else {}
-    ingestion = workflow.get("base_ingestion") if isinstance(workflow, Mapping) else None
-    uploaded_ingestions = (
-        workflow.get("uploaded_ingestions", []) if isinstance(workflow, Mapping) else []
-    )
-
-    return {
-        "question": question,
-        "ingestion": ingestion,
-        "uploaded_ingestions": uploaded_ingestions,
-        "response": response,
-    }
 
 
 class RagApi:
@@ -209,6 +123,7 @@ class RagApi:
         avoid state races while reconfiguring the pipeline.
         """
         self._state_lock = RLock()
+        self._chroma_client: "chromadb.ClientAPI | None" = None
         self.is_initialized = False
         self.config = self._build_config(overrides=config, config_path=config_path)
         self.pipeline = StandardRAGPipeline(self.config.to_dict())
@@ -240,7 +155,7 @@ class RagApi:
         if isinstance(overrides, Mapping):
             mapping = overrides
         elif hasattr(overrides, "to_dict") and callable(getattr(overrides, "to_dict")):
-            mapping = overrides.to_dict()  # type: ignore[arg-type]
+            mapping = overrides.to_dict()
 
         if mapping is None:
             raise TypeError(f"Unsupported overrides type: {type(overrides)!r}")
@@ -289,35 +204,12 @@ class RagApi:
             raise RuntimeError("RAG pipeline has been closed")
         return pipeline
 
-    def _ingest_path(
-        self,
-        documents_dir: Path | str,
-        *,
-        document_name: str | None = None,
-        namespace: str = "global",
-    ) -> ProcessingResult:
-        """Ingest ``documents_dir`` through the standard pipeline helper.
-
-        Args:
-            documents_dir: Location of the artefacts to ingest.
-            document_name: Optional metadata override applied during ingestion.
-            namespace: Target namespace ("global" or "local").
-        """
-        pipeline = self._require_pipeline()
-        result = rag_pipeline.ingest_documents(
-            pipeline,
-            Path(documents_dir),
-            document_name=document_name,
-            namespace=namespace,
-        )
-        if result.success:
-            self.is_initialized = True
-        return result
-
     def initialize_pipeline(
             self,
             documents_dir: Optional[str | Path],
             namespace: str = "global",
+            include_images: bool = True,
+            describe_images: bool = False,
     ) -> bool:
         """Initialise the pipeline and optionally ingest documents.
 
@@ -325,6 +217,10 @@ class RagApi:
             documents_dir: Optional path pointing to documents that should be
                 ingested as part of the initialisation sequence.
             namespace: Target namespace ("global" or f"{chat_id}_local").
+            include_images: Optional flag enabling multimodal ingestion when
+                supported by the configured vector store.
+            describe_images: When ``True``, generate captions for detected
+                images and store them as text documents within the namespace.
 
         Returns:
             ``True`` when the pipeline is ready for queries. ``False`` when the
@@ -333,7 +229,12 @@ class RagApi:
         with self._state_lock:
             self._require_pipeline()
             self.is_initialized = True
-            return self.pipeline.ingest_documents(documents_dir, namespace=namespace)
+            return self.pipeline.ingest_documents(
+                documents_dir,
+                namespace=namespace,
+                include_images=include_images,
+                describe_images=describe_images,
+            )
 
     def ask_question(self, question: str, **kwargs: Any) -> Dict[str, Any]:
         """Query the pipeline and return the structured response.
@@ -360,120 +261,8 @@ class RagApi:
                 logger.error("Attempted to query RAG pipeline before initialisation")
                 raise RuntimeError("RAG pipeline is not initialised")
 
-            try:
-                pipeline = self._require_pipeline()
-                return pipeline.query(question, **kwargs)
-            except Exception as exc:
-                logger.exception("Pipeline query failed: %s", exc)
-                raise RuntimeError("Failed to process the question") from exc
-
-    def add_documents(self, path: Path | str) -> bool:
-        """Ingest additional documents into the pipeline.
-
-        Args:
-            path: Filesystem path referencing documents that should be added to
-                the active vector store.
-
-        Returns:
-            ``True`` if ingestion succeeds, ``False`` otherwise.
-
-        Raises:
-            ValueError: If ``path`` is an empty string.
-        """
-        if not path:
-            raise ValueError("A valid path must be provided for ingestion")
-
-        with self._state_lock:
-            logger.info("Ingesting documents from %s", path)
-            result = self._ingest_path(path, namespace="local")
-            if not result.success:
-                logger.error("Ingestion pipeline reported failure for %s", path)
-                return False
-
-            if result.documents_ingested > 0:
-                logger.info(
-                    "Successfully ingested %s documents from %s",
-                    result.documents_ingested,
-                    path,
-                )
-            elif result.documents_skipped > 0:
-                logger.info("Skipped ingestion for %s; documents unchanged", path)
-            else:
-                logger.info("Ingestion completed for %s without new documents", path)
-            return True
-
-    def run_workflow(
-        self,
-        question: str,
-        *,
-        documents_dir: Path | str | None = None,
-        documents_path: Path | str | None = None,
-        uploaded_documents: Sequence[Path | str] | None = None,
-        query_kwargs: Mapping[str, Any] | None = None,
-    ) -> Dict[str, Any]:
-        """Ingest supplied artefacts and execute a single query workflow.
-
-        Args:
-            question: Natural-language prompt executed against the pipeline.
-            documents_dir: Optional base path ingested before the query.
-            documents_path: Backwards-compatible alias for ``documents_dir``.
-            uploaded_documents: Optional sequence of additional artefacts to ingest.
-            query_kwargs: Optional mapping forwarded to :meth:`StandardRAGPipeline.query`.
-
-        Returns:
-            A dictionary containing the ``question``, the ingestion result for
-            ``documents_path`` (``base_ingestion``), a list of ingestion results for
-            ``uploaded_documents`` (``uploaded_ingestions``), and the pipeline
-            ``response``.
-
-        Raises:
-            ValueError: If ``question`` is blank.
-            RuntimeError: When the pipeline has been closed, fails to initialise, or the
-                query raises an error.
-        """
-        if not question:
-            raise ValueError("Question must be a non-empty string")
-
-        uploads: Sequence[Path | str] = uploaded_documents or ()
-        kwargs: Dict[str, Any] = dict(query_kwargs or {})
-
-        document_source = documents_dir if documents_dir is not None else documents_path
-        if (
-            documents_dir is not None
-            and documents_path is not None
-            and Path(documents_dir) != Path(documents_path)
-        ):
-            raise ValueError("documents_dir and documents_path refer to different locations")
-
-        with self._state_lock:
             pipeline = self._require_pipeline()
-
-            base_result: ProcessingResult | None = None
-            if document_source is not None:
-                logger.info("Running workflow ingestion from %s", document_source)
-                base_result = self._ingest_path(document_source)
-
-            uploaded_results: list[ProcessingResult] = []
-            for candidate in uploads:
-                logger.info("Running workflow ingestion for upload %s", candidate)
-                uploaded_results.append(self._ingest_path(candidate))
-
-            if not self.is_initialized:
-                logger.error("Attempted to query RAG pipeline before initialisation")
-                raise RuntimeError("RAG pipeline is not initialised")
-
-            try:
-                response = pipeline.query(question, **kwargs)
-            except Exception as exc:
-                logger.exception("Pipeline query failed: %s", exc)
-                raise RuntimeError("Failed to process the question") from exc
-
-            return {
-                "question": question,
-                "base_ingestion": base_result,
-                "uploaded_ingestions": uploaded_results,
-                "response": response,
-            }
+            return pipeline.query(question, **kwargs)
 
     def close(self) -> None:
         """Close the underlying pipeline and release its resources."""
@@ -483,7 +272,6 @@ class RagApi:
                 return
             self.pipeline = None
             self.is_initialized = False
-
         try:
             pipeline.close()
         except Exception as exc:
@@ -494,6 +282,43 @@ class RagApi:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()
+
+    def _get_chroma_client(self, chroma_client: "chromadb.ClientAPI | None" = None):
+        """Return a cached Chroma client or store a provided one."""
+        import chromadb
+
+        if chroma_client is not None:
+            self._chroma_client = chroma_client
+        if self._chroma_client is None:
+            self._chroma_client = chromadb.Client()
+        return self._chroma_client
+
+    def _build_store(
+        self,
+        *,
+        collection_name: str,
+        embedding_function: "Embeddings",
+        chroma_client: "chromadb.ClientAPI | None" = None,
+    ) -> "Chroma":
+        return Chroma(
+            collection_name=collection_name,
+            embedding_function=embedding_function,
+            client=self._get_chroma_client(chroma_client),
+        )
+
+    def delete_collection(
+        self, collection: str, *, chroma_client: "chromadb.ClientAPI | None" = None
+    ) -> None:
+        """Delete a Chroma collection."""
+        client = self._get_chroma_client(chroma_client)
+        client.delete_collection(collection)
+
+    def list_collections(
+        self, *, chroma_client: "chromadb.ClientAPI | None" = None
+    ) -> list:
+        """List all Chroma collections."""
+        client = self._get_chroma_client(chroma_client)
+        return client.list_collections()
 
     def get_pipeline_info(self) -> Dict[str, Any]:
         """Return metadata describing the current pipeline state.
@@ -539,15 +364,3 @@ class RagApi:
                 "components": pipeline_details,
                 "last_ingestion": ingestion_snapshot,
             }
-
-
-def __getattr__(name: str) -> object:
-    """Lazily expose optional Ollama helpers without forcing imports."""
-
-    if name in _OLLAMA_EXPORTS:
-        from geomas.core.inference import ollama_client as _ollama_client
-
-        return getattr(_ollama_client, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-

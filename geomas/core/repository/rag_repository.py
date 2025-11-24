@@ -9,7 +9,6 @@ from typing import Any, Dict, Mapping, MutableMapping, Type, TypeVar
 
 import yaml
 
-from geomas.core.rag_modules.steps.retriever import DEFAULT_SIMILARITY_THRESHOLD
 from geomas.core.repository.constant_repository import SUMMARY_LLM_URL
 from geomas.core.repository.parsing_repository import ChunkingParamsConfig
 
@@ -129,23 +128,33 @@ class RetrievalConfigTemplate:
     top_k: int = 5
     filters: Dict[str, Any] = field(default_factory=dict)
     embedding_model_name: str | None = "all-MiniLM-L6-v2"
+    checkpoint: str | None = None
     final_top_k: int | None = None
     text_top_k: int | None = None
-    chunk_limit: int = 3
-    score_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
+    chunk_limit: int | None = None
+    score_threshold: float | None = 0.0
+    search_type: str = "similarity_score_threshold"
+    search_kwargs: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             "top_k": self.top_k,
             "filters": dict(self.filters),
             "embedding_model_name": self.embedding_model_name,
-            "chunk_limit": self.chunk_limit,
-            "score_threshold": self.score_threshold,
+            "checkpoint": self.checkpoint,
         }
         if self.final_top_k is not None:
             data["final_top_k"] = self.final_top_k
         if self.text_top_k is not None:
             data["text_top_k"] = self.text_top_k
+        if self.chunk_limit is not None:
+            data["chunk_limit"] = self.chunk_limit
+        if self.score_threshold is not None:
+            data["score_threshold"] = self.score_threshold
+        if self.search_type:
+            data["search_type"] = self.search_type
+        if self.search_kwargs:
+            data["search_kwargs"] = dict(self.search_kwargs)
         return data
 
 
@@ -196,13 +205,6 @@ class ChromaRankingConfigTemplate:
 
 @dataclass(slots=True)
 class RankingConfigTemplate:
-    """Ranking section template.
-
-    The template controls both LLM-based and Chroma-based rerankers. The
-    ``chroma`` attribute exposes :class:`ChromaRankingConfigTemplate`, providing
-    strongly typed accessors for embedding selection.
-    """
-
     use_llm_reranking: bool = False
     llm_url: str = SUMMARY_LLM_URL
     inference_config: Dict[str, Any] = field(default_factory=dict)
@@ -231,15 +233,17 @@ class RankingConfigTemplate:
 
 @dataclass(slots=True)
 class DataConfigTemplate:
-    """Data section template."""
+    """Data loading section template."""
 
     loader_type: str = "auto"
     loader_params: Dict[str, Any] = field(default_factory=dict)
+    transformations: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "loader_type": self.loader_type,
             "loader_params": dict(self.loader_params),
+            "transformations": dict(self.transformations),
         }
 
 

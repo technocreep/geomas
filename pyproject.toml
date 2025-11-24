@@ -15,7 +15,9 @@ dependencies = [
     "boto3",
     "dotenv",
     "google-generativeai",
-    "tenacity"
+    "tenacity",
+    "langchain_experimental",
+    "open_clip_torch"
 ]
 
 [tool.setuptools]

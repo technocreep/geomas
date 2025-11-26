@@ -207,8 +207,8 @@ class RagApi:
     def initialize_pipeline(
             self,
             documents_dir: Optional[str | Path],
-            namespace: str = "global",
-            include_images: bool = True,
+            namespace: str,
+            include_images: bool = False,
             describe_images: bool = False,
     ) -> bool:
         """Initialise the pipeline and optionally ingest documents.
@@ -229,14 +229,15 @@ class RagApi:
         with self._state_lock:
             self._require_pipeline()
             self.is_initialized = True
-            return self.pipeline.ingest_documents(
+            result = self.pipeline.ingest_documents(
                 documents_dir,
                 namespace=namespace,
                 include_images=include_images,
                 describe_images=describe_images,
             )
+            return result
 
-    def ask_question(self, question: str, **kwargs: Any) -> Dict[str, Any]:
+    def ask_question(self, question: str, history: str, **kwargs: Any) -> Dict[str, Any]:
         """Query the pipeline and return the structured response.
 
         Args:
@@ -262,7 +263,7 @@ class RagApi:
                 raise RuntimeError("RAG pipeline is not initialised")
 
             pipeline = self._require_pipeline()
-            return pipeline.query(question, **kwargs)
+            return pipeline.query(question, history, **kwargs)
 
     def close(self) -> None:
         """Close the underlying pipeline and release its resources."""

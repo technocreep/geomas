@@ -341,21 +341,23 @@ def format_text_context(
     for index, entry in enumerate(text_context):
         if limit is not None and len(formatted) >= limit:
             break
-        if not isinstance(entry, Sequence) or len(entry) < 4:
+        if not isinstance(entry, Sequence) or len(entry) < 5:
             continue
-        doc_id, raw_text, metadata, score = entry[:4]
+        doc_id, chunk_index, doc_text, metadata, score = entry[:5]
         metadata_map: Mapping[str, object] = metadata if isinstance(metadata, Mapping) else {}
         formatted.append(
             {
                 "id": doc_id,
+                "chunk_index": chunk_index,
                 "document": metadata_map.get("document_name")
                 or metadata_map.get("source")
                 or str(doc_id),
                 "score": score,
-                "preview": str(raw_text).strip().replace("\n", " "),
+                "preview": str(doc_text).strip().replace("\n", " "),
                 "type": metadata_map.get("type", "text"),
                 "database_scope": metadata_map.get("scope"),
                 "source_path": metadata_map.get("source_path"),
             }
         )
     return formatted
+

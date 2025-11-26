@@ -391,7 +391,7 @@ class StandardRAGPipeline(BaseRAGPipeline):
             self,
             documents_path: str,
             *,
-            describe_images: bool = False,
+            describe_images: bool,
             **kwargs: Any
     ) -> bool:
         """Ingest documents into the configured vector store.
@@ -430,9 +430,9 @@ class StandardRAGPipeline(BaseRAGPipeline):
                 )
         return result.success
 
-    def query(self, question: str, **kwargs: Any) -> Dict[str, Any]:
+    def query(self, question: str, history: str, **kwargs: Any) -> Dict[str, Any]:
         search_kwargs = self._build_search_kwargs(self.config_template.retrieval)
-        score_threshold = getattr(self.config_template.retrieval, "score_threshold", 0.5)
+        score_threshold = getattr(self.config_template.retrieval, "score_threshold", 0.9)
         if score_threshold is not None:
             search_kwargs.setdefault("score_threshold", score_threshold)
         base_top_k = (
@@ -544,17 +544,17 @@ class StandardRAGPipeline(BaseRAGPipeline):
         text_context = build_scored_context(unique_results, kwargs.get("top_k"))
         documents_for_context = self._documents_from_context(text_context)
 
-        if reranker and text_context:
-            chroma_documents = list(documents_for_context)
-            reranked_documents = reranker.rerank(question, chroma_documents)
-            ordered_context = self._map_documents_to_context(
-                reranked_documents,
-                chroma_documents,
-                text_context,
-            )
-            if ordered_context:
-                text_context = ordered_context
-                documents_for_context = self._documents_from_context(text_context)
+        # if reranker and text_context:
+        #     chroma_documents = list(documents_for_context)
+        #     reranked_documents = reranker.rerank(question, chroma_documents)
+        #     ordered_context = self._map_documents_to_context(
+        #         reranked_documents,
+        #         chroma_documents,
+        #         text_context,
+        #     )
+        #     if ordered_context:
+        #         text_context = ordered_context
+        #         documents_for_context = self._documents_from_context(text_context)
 
         # if reranker and text_context:
         #     rerank_documents = list(documents_for_context)
@@ -572,7 +572,7 @@ class StandardRAGPipeline(BaseRAGPipeline):
         #         text_context = ordered_context
 
         relevant_sources = self._collect_sources(text_context, kwargs.get("top_k"))
-        answer = self._generate_answer(question, text_context)
+        answer = self._generate_answer(question, text_context, history)
 
         return {
             "question": question,
@@ -600,7 +600,10 @@ class StandardRAGPipeline(BaseRAGPipeline):
         return sources
 
     def _generate_answer(
-        self, question: str, text_context: list[tuple[str, int | None, str, dict, float]]
+        self, 
+        question: str, 
+        text_context: list[tuple[str, int | None, str, dict, float]], 
+        history: str,
     ) -> str | None:
         client = getattr(self, "_lm_client", None)
         if client is None:
@@ -613,8 +616,21 @@ class StandardRAGPipeline(BaseRAGPipeline):
             messages.append({"role": "system", "content": self._lm_system_prompt})
 
         instruction = (
-            "Ты — геологический ассистент. Используй данные из раздела Sources, чтобы дать максимально точный и развернутый ответ."
+            "Ты — геологический ассистент."
+            "Используй данные из раздела Sources, чтобы дать максимально точный и развернутый ответ."
         )
+        history_user: list = []
+        history_geomas: list = []
+        max_history: int = 25
+        for i, history_message in enumerate(history):
+            if i % 2 == 0:
+                history_user.append(f"User: {history_message.get('message_text')}")
+            else:
+                history_geomas.append(f"GEOMAS: {history_message.get('message_text')}")
+        if len(history_user) > max_history:
+            history_user = history_user[-max_history:]
+            history_geomas = history_geomas[-max_history:]
+
         prompt = (
             "### Instruction:\n"
             f"{instruction}\n\n"
@@ -622,6 +638,10 @@ class StandardRAGPipeline(BaseRAGPipeline):
             f"{question}\n\n"
             "### Sources:\n"
             f"{context_block}\n\n"
+            "История чата Пользователь\n"
+            f"{history_user}\n\n"
+            "История чата GEOMAS\n"
+            f"{history_geomas}\n\n"
             "### Response:\n"
         )
         messages.append({"role": "user", "content": prompt})

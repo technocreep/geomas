@@ -60,10 +60,11 @@ class DatabaseRagPipeline:
         *,
         loader_overrides: Mapping[str, object] | None = None,
         document_name: str | None = None,
-        namespace: str = "global",
+        namespace: str,
         generate_image_descriptions: bool = False,
+        include_images: bool = False,
     ) -> ProcessingResult:
-        path = Path(folder_path).expanduser().resolve()
+        path = Path(folder_path)
         try:
             adapter_result: AdapterResult = self.data_loader.load_and_transform(
                 path,
@@ -75,6 +76,7 @@ class DatabaseRagPipeline:
             return ProcessingResult(success=False)
 
         documents: list[Document] = list(adapter_result.documents)
+       
         image_documents = self._collect_images(
             path, document_name=document_name, namespace=namespace
         )
@@ -83,7 +85,8 @@ class DatabaseRagPipeline:
             namespace=namespace,
             enabled=generate_image_descriptions,
         )
-        if image_documents:
+        
+        if include_images:
             documents.extend(image_documents)
 
         if not documents:
@@ -91,6 +94,7 @@ class DatabaseRagPipeline:
             return ProcessingResult(success=False)
 
         try:
+            print(namespace)
             insertion = self._ingest_documents(
                 documents,
                 namespace=namespace,
@@ -170,6 +174,7 @@ class DatabaseRagPipeline:
                     exc,
                 )
         if image_uris:
+            print(self.vector_store)
             self.vector_store.add_images(
                 uris=image_uris,
                 metadatas=image_metadatas,
@@ -191,8 +196,8 @@ class DatabaseRagPipeline:
             skipped=skipped_images,
         )
 
-    @staticmethod
     def _describe_images(
+        self,
         images: Sequence[Document],
         *,
         namespace: str,
@@ -217,6 +222,7 @@ class DatabaseRagPipeline:
 
             try:
                 description_text = describe_image(image_path=str(candidate_path), output=None)
+                self.description = description_text
             except Exception as exc:
                 logger.warning(
                     "Failed to describe image '%s': %s", candidate_path, exc

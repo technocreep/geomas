@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable, MutableMapping
 
@@ -103,13 +104,28 @@ def _get_str(key: str, default: str | None = None) -> str | None:
 
 
 def _resolve_path(key: str, default: str) -> str:
-    value = _get_str(key, default)
-    if value is None:
-        value = default
-    path = Path(value)
-    if not path.is_absolute():
-        return str(Path(ROOT_DIR) / path)
-    return str(path)
+    value = _get_str(key, default) or default
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    resolved = candidate.expanduser().resolve()
+    try:
+        resolved.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logger.warning("Could not create directory '%s': %s", resolved, exc)
+    if not os.access(resolved, os.W_OK):
+        fallback = Path(tempfile.gettempdir()) / resolved.name
+        try:
+            fallback.mkdir(parents=True, exist_ok=True)
+            logger.warning(
+                "Path %s is not writable; using fallback %s instead", resolved, fallback
+            )
+            resolved = fallback
+        except Exception as exc:
+            logger.exception(
+                "Unable to create writable directory for %s: %s", key, exc
+            )
+    return str(resolved)
 
 
 def _clean_empty_values(keys: Iterable[str]) -> None:

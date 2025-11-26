@@ -17,7 +17,10 @@ dependencies = [
     "google-generativeai",
     "tenacity",
     "langchain_experimental",
-    "open_clip_torch"
+    "open_clip_torch",
+    "unsloth",
+    "ollama",
+    "langchain_chroma",
 ]
 
 [tool.setuptools]

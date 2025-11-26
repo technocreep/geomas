@@ -12,6 +12,7 @@ from typing import Iterator, Mapping
 from geomas.api import rag as rag_module
 from geomas.api.rag import RagApi
 from geomas.core.logging.logger import get_logger
+from geomas.core.repository.constant_repository import _resolve_path
 from geomas.core.inference.ollama_client import (
     OllamaSettings,
     build_ollama_rag_config,
@@ -68,11 +69,11 @@ def build_paths(
     chat_dir = Path(chat_dir)
     uploads_dir = Path(uploads_dir)
     local_rag_dir = Path(local_rag_dir)
-    document_dir.mkdir(parents=True, exist_ok=True)
-    global_rag_dir.mkdir(parents=True, exist_ok=True)
-    chat_dir.mkdir(parents=True, exist_ok=True)
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-    local_rag_dir.mkdir(parents=True, exist_ok=True)
+    _resolve_path("", document_dir)
+    _resolve_path("", global_rag_dir)
+    _resolve_path("", chat_dir)
+    _resolve_path("", uploads_dir)
+    _resolve_path("", local_rag_dir)
     return dict(
         documents_dir=documents_dir,
         global_rag_dir=global_rag_dir,

@@ -61,9 +61,82 @@ async def worker():
     async with httpx.AsyncClient() as client:
         while True:
             data = await task_queue.get()
+<<<<<<< HEAD
             curent_type = data[0]
             if curent_type == "message":
                 _, message, chat_id, history, params = data
+=======
+            message, chat_id, params = data
+            
+            query_kwargs = {"text_top_k": 4, "rerank_top_k": 3}
+            settings_overrides: dict[str, object] = {"temperature": 0.2}
+            if "temperature" in params:
+                settings_overrides["temperature"] = params["temperature"]
+            print(f"Check folders...")
+            include_global = False
+            reset_local_rag = True
+
+
+            path = os.path.join(UPLOAD_ROOT, f"{chat_id}")
+            print(path)
+
+            if not os.path.exists(path):
+                os.makedirs(path)
+                include_global = True
+
+            path_db = os.path.join(path, ".vector-store")
+            if not os.path.exists(path_db):
+                os.makedirs(path_db)
+            
+            path = os.path.join(path, "uploads")
+            print(path)
+
+            if not os.path.exists(path):
+                os.makedirs(path)
+
+            paths = build_paths(
+                documents_dir="./data1/global/uploads",
+                global_rag_dir="./data/global/.vector-store",
+                chat_dir=f"./data/{chat_id}",
+                uploads_dir=f"./data/{chat_id}/uploads",
+                local_rag_dir=f"./data/{chat_id}/.vector-store",
+            )
+            # create empty small db
+            try:
+                print(f"Processing message: {message}")
+                collection_targets = default_collection_targets(chat_id, paths=paths, include_global=include_global)
+                query_kwargs["scopes"] = collection_targets
+                with create_chat_session(
+                    paths=paths,
+                    chat_id=chat_id,
+                    settings=settings_overrides,
+                    reset_local_rag=reset_local_rag,
+                    collection_targets=collection_targets,
+                ) as api:
+                    print("Step 3/4: Ingesting uploads...")
+                    print("Step 4/4: Querying combined context... [1]")
+                    response, context_rows = answer_with_combined_context(
+                        api,
+                        message,
+                        chat_id=chat_id,
+                        query_kwargs=query_kwargs,
+                    )
+                    api.close()
+                    #show_results(response, context_rows)
+                #result = run_ollama_workflow(message, settings=params)
+                files = []
+
+                for entry in context_rows:
+                    files.append(entry['document'])
+                    score = entry.get("score")
+                    if isinstance(score, (int, float)):
+                        score_display = f"{float(score):.3f}"
+                    else:
+                        score_display = str(score)
+                    scope = entry.get("database_scope")
+                    scope_suffix = f", scope={scope}" if scope else ""
+                    print(f"- {entry.get('document')} (score={score_display}{scope_suffix})")
+>>>>>>> 56c6d58f1bda419f595b8761e360000ca64718c9
                 
                 query_kwargs = {"top_k": 5}
                 settings_overrides: dict[str, object] = {"temperature": 0.2}
@@ -219,7 +292,36 @@ async def receive_file(chat_id: str = Form(...), filename: str = Form(...), file
     file_location = os.path.join(path, f"{filename}")
     with open(file_location, "wb") as f:
         f.write(await file.read())
+<<<<<<< HEAD
     await task_queue.put(["file", filename, chat_id, file, include_global])
+=======
+    # upload file to db
+    paths = build_paths(
+        documents_dir="./data1/global/uploads",
+        global_rag_dir="./data/global/.vector-store",
+        chat_dir=f"./data/{chat_id}",
+        uploads_dir=f"./data/{chat_id}/uploads",
+        local_rag_dir=f"./data/{chat_id}/.vector-store",
+    )
+
+    #paths["uploads_dir"] = Path(f"data/{chat_id}/uploads/")
+    settings_overrides: dict[str, object] = {"temperature": 0.2}
+
+    with create_chat_session(
+        paths=paths,
+        chat_id=chat_id,
+        settings=settings_overrides,
+        reset_local_rag=False,
+    ) as api:
+        print("Step 3/4: Ingesting uploads...")
+        ingest_local_documents(
+            api,
+            paths=paths,
+        )
+        print(f"Step 3/4 complete.")
+        api.close()
+
+>>>>>>> 56c6d58f1bda419f595b8761e360000ca64718c9
     return JSONResponse({
         "message": "File received successfully",
         "chat_id": chat_id,

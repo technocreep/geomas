@@ -144,7 +144,7 @@ def create_chat_session(
         settings_overrides=settings,
     ) as api:
         try:
-            api.initialize_pipeline(paths.get("uploads_dir"))
+            api.initialize_pipeline(paths.get("uploads_dir"), f"{chat_id}_local")
             yield api
         finally:
             api.close()
@@ -171,6 +171,7 @@ def answer_with_combined_context(
     *,
     chat_id: str,
     query_kwargs: Mapping[str, object] | None = None,
+    history: str = "",
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     logger.info(
         "Step 4/4: querying combined context for chat %s and question: %s",
@@ -178,7 +179,7 @@ def answer_with_combined_context(
         question,
     )
     payload = dict(query_kwargs or {})
-    response = api.ask_question(question, **payload)
+    response = api.ask_question(question, history, **payload)
     raw_context = response.get("text_context", [])
     formatted_rows = format_text_context(raw_context)
     return response, formatted_rows

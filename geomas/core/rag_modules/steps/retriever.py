@@ -43,7 +43,7 @@ def _document_with_score(
 ) -> Document:
     metadata = dict(document.metadata or {})
 
-    raw_distance = metadata.get("distance") if isinstance(metadata, Mapping) else None
+    raw_distance = metadata.get("distances")
     existing_score: float | None = None
     for key in ("relevance_score", "normalized_score"):
         if key in metadata:
@@ -60,7 +60,7 @@ def _document_with_score(
         metadata.setdefault("relevance_score", normalised)
         metadata.setdefault("normalized_score", normalised)
     if raw_distance is None and score is not None:
-        metadata.setdefault("distance", float(score))
+        metadata.setdefault("distances", float(score))
 
     if scope:
         metadata.setdefault("scope", scope)
@@ -197,30 +197,20 @@ class Retriever:
         scope: str | None = None,
         allow_default_store: bool = True,
     ) -> list[Document]:
-        if limit <= 0:
-            return []
-
         filter_payload = dict(filters or {})
-
         if query_images:
             return self._search_by_images(
                 query_images,
                 k=limit,
                 filter=filter_payload or None,
             )
-
-        if query is None:
-            return []
-
-        retriever = self._build_retriever(
-            limit,
-            filter_payload or None,
-            vector_store=vector_store,
-            allow_default_store=allow_default_store,
+        documents = vector_store.similarity_search_with_score(
+            query=query, 
+            k=limit, 
+            filter=filter_payload or None,
         )
-        documents = retriever.invoke(query)
         return [
-            _document_with_score(doc, doc.metadata.get("distance"), scope=scope)
+            _document_with_score(doc[0], doc[1], scope=scope)
             for doc in documents
         ]
 

@@ -112,7 +112,7 @@ class DataLoaderAdapter:
 
     def _load_file(self, path: Path, document_name: str | None) -> tuple[list[Document], list[Path]]:
         suffix = path.suffix.lower()
-        resolved_name = document_name or path.stem
+        resolved_name = document_name or path.stem + path.suffix
         cleanup_paths: list[Path] = []
 
         fingerprint, last_modified, size_bytes = self._collect_file_metadata(path)
@@ -352,7 +352,7 @@ def format_text_context(
                 "document": metadata_map.get("document_name")
                 or metadata_map.get("source")
                 or str(doc_id),
-                "score": score,
+                "score": metadata_map.get("normalized_score"),
                 "preview": str(doc_text).strip().replace("\n", " "),
                 "type": metadata_map.get("type", "text"),
                 "database_scope": metadata_map.get("scope"),

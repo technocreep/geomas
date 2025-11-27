@@ -94,7 +94,6 @@ class DatabaseRagPipeline:
             return ProcessingResult(success=False)
 
         try:
-            print(namespace)
             insertion = self._ingest_documents(
                 documents,
                 namespace=namespace,
@@ -174,7 +173,6 @@ class DatabaseRagPipeline:
                     exc,
                 )
         if image_uris:
-            print(self.vector_store)
             self.vector_store.add_images(
                 uris=image_uris,
                 metadatas=image_metadatas,
@@ -240,7 +238,7 @@ class DatabaseRagPipeline:
                 "type": "image_description",
                 "description_for": metadata.get("source")
                 or metadata.get("document_name")
-                or candidate_path.stem,
+                or candidate_path.stem + candidate_path.suffix,
                 "scope": namespace,
             }
             descriptions.append(
@@ -272,8 +270,8 @@ class DatabaseRagPipeline:
                 metadata = {
                     "type": "image",
                     "scope": namespace,
-                    "source": document_name or candidate.stem,
-                    "document_name": document_name or candidate.stem,
+                    "source": document_name or candidate.stem + candidate.suffix,
+                    "document_name": document_name or candidate.stem + candidate.suffix,
                     "source_path": str(candidate),
                     "source_fingerprint": fingerprint,
                     "source_last_modified": last_modified,

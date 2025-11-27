@@ -544,17 +544,17 @@ class StandardRAGPipeline(BaseRAGPipeline):
         text_context = build_scored_context(unique_results, kwargs.get("top_k"))
         documents_for_context = self._documents_from_context(text_context)
 
-        # if reranker and text_context:
-        #     chroma_documents = list(documents_for_context)
-        #     reranked_documents = reranker.rerank(question, chroma_documents)
-        #     ordered_context = self._map_documents_to_context(
-        #         reranked_documents,
-        #         chroma_documents,
-        #         text_context,
-        #     )
-        #     if ordered_context:
-        #         text_context = ordered_context
-        #         documents_for_context = self._documents_from_context(text_context)
+        if reranker and text_context:
+            chroma_documents = list(documents_for_context)
+            reranked_documents = reranker.rerank(question, chroma_documents)
+            ordered_context = self._map_documents_to_context(
+                reranked_documents,
+                chroma_documents,
+                text_context,
+            )
+            if ordered_context:
+                text_context = ordered_context
+                documents_for_context = self._documents_from_context(text_context)
 
         # if reranker and text_context:
         #     rerank_documents = list(documents_for_context)
@@ -619,17 +619,15 @@ class StandardRAGPipeline(BaseRAGPipeline):
             "Ты — геологический ассистент."
             "Используй данные из раздела Sources, чтобы дать максимально точный и развернутый ответ."
         )
-        history_user: list = []
-        history_geomas: list = []
+        history: list = []
         max_history: int = 25
         for i, history_message in enumerate(history):
             if i % 2 == 0:
-                history_user.append(f"User: {history_message.get('message_text')}")
+                history.append(f"Prompt: {history_message.get('message_text')}")
             else:
-                history_geomas.append(f"GEOMAS: {history_message.get('message_text')}")
-        if len(history_user) > max_history:
-            history_user = history_user[-max_history:]
-            history_geomas = history_geomas[-max_history:]
+                history.append(f"Response: {history_message.get('message_text')}")
+        if len(history) > max_history:
+            history = history[-max_history:]
 
         prompt = (
             "### Instruction:\n"
@@ -637,11 +635,9 @@ class StandardRAGPipeline(BaseRAGPipeline):
             "### Input:\n"
             f"{question}\n\n"
             "### Sources:\n"
+            "[0] История чата\n"
+            f"{history}\n\n"
             f"{context_block}\n\n"
-            "История чата Пользователь\n"
-            f"{history_user}\n\n"
-            "История чата GEOMAS\n"
-            f"{history_geomas}\n\n"
             "### Response:\n"
         )
         messages.append({"role": "user", "content": prompt})

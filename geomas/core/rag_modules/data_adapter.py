@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 
 from bs4 import BeautifulSoup
 from langchain_core.documents import Document
+from langchain_community.document_loaders import JSONLoader
 
 from geomas.core.data.custom_dataloaders import LangChainDocumentLoader
 from geomas.core.rag_modules.parser.rag_parser import DocumentParser
@@ -169,7 +170,13 @@ class DataLoaderAdapter:
 
     def _entries_from_json(self, path: Path) -> list[tuple[str, Mapping[str, object]]]:
         try:
-            loader = LangChainDocumentLoader(path)
+            loader = JSONLoader(
+                file_path=path,
+                jq_schema='{page_content: .page_content, metadata: .metadata}',
+                text_content=True,
+                content_key="page_content",
+                metadata_func=lambda record, index: record["metadata"]
+            )
             raw_documents = list(loader.lazy_load())
         except Exception as exc:
             logger.error("Failed to load JSON document '%s': %s", path, exc)
@@ -181,7 +188,6 @@ class DataLoaderAdapter:
             metadata.setdefault("source", metadata.get("source_path") or str(path))
             metadata.setdefault("source_path", str(path))
             entries.append((str(document.page_content), metadata))
-
         return entries
 
     def _entries_from_textual_file(

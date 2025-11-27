@@ -21,6 +21,7 @@ dependencies = [
     "unsloth",
     "ollama",
     "langchain_chroma",
+    "jq",
 ]
 
 [tool.setuptools]

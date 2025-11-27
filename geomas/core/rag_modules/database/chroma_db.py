@@ -162,10 +162,16 @@ class DatabaseRagPipeline:
                 )
             )
         inserted_texts = 0
+        batch_size = 5461
         if text_documents:
             try:
+                while len(text_documents) > batch_size:
+                    documents = text_documents[:batch_size]
+                    text_documents = text_documents[batch_size:]
+                    self.vector_store.add_documents(documents=documents)
+                    inserted_texts += batch_size
                 self.vector_store.add_documents(documents=text_documents)
-                inserted_texts = len(text_documents)
+                inserted_texts += len(text_documents)
             except Exception as exc:
                 logger.warning(
                     "Failed to store text documents for namespace %s: %s",

@@ -26,31 +26,49 @@ logging.getLogger("torch.distributed.elastic.multiprocessing.redirects").setLeve
 app = typer.Typer(help="GEOMAS")
 logger = get_logger()
 
-def unarchive(file_path, output_dir):
+def unarchive(file_path, output_dir, prefix="blessed_"):
     if not os.path.isfile(file_path):
         print(f"No such file detected: {file_path}")
         return
 
-    # ZIP archives
+    extracted_paths = []  # to record only those relics drawn from the archive
+
+    # Helper to prefix only freshly-extracted files
+    def apply_prefix():
+        for p in extracted_paths:
+            if os.path.isfile(p):
+                new_path = os.path.join(os.path.dirname(p), prefix + "_" + os.path.basename(p))
+                os.rename(p, new_path)
+
+    # ZIP
     if zipfile.is_zipfile(file_path):
         with zipfile.ZipFile(file_path, 'r') as zf:
-            zf.extractall(output_dir)
-        print(">> Archive purity confirmed: ZIP extracted.")
+            for member in zf.namelist():
+                zf.extract(member, output_dir)
+                extracted_paths.append(os.path.join(output_dir, member))
+        apply_prefix()
+        print(">> ZIP reliquary opened—freshly forged files now bear the sacred mark.")
 
-    # TAR, TAR.GZ, TGZ, TAR.BZ2, etc.
+    # TAR & kin
     elif tarfile.is_tarfile(file_path):
         with tarfile.open(file_path) as tf:
-            tf.extractall(output_dir)
-        print(">> Archive integrity validated: TAR extracted.")
-    
-    # RAR archives
+            for member in tf.getmembers():
+                tf.extract(member, output_dir)
+                extracted_paths.append(os.path.join(output_dir, member.name))
+        apply_prefix()
+        print(">> TAR vault breached—its offerings duly consecrated with the prefix.")
+
+    # RAR
     elif rarfile.is_rarfile(file_path):
         with rarfile.RarFile(file_path) as rf:
-            rf.extractall(output_dir)
-        print(">> Extraction complete: RAR machine-spirit appeased.")
+            for member in rf.infolist():
+                rf.extract(member, output_dir)
+                extracted_paths.append(os.path.join(output_dir, member.filename))
+        apply_prefix()
+        print(">> RAR spirit pacified—its liberated data adorned with proper sigils.")
 
     else:
-        print("Unfamiliar data-reliquary detected: not a recognized archive format.")
+        print("Unfamiliar archive-form encountered—no rite of prefixing performed.")
 
     return
 
@@ -77,7 +95,7 @@ task_queue = asyncio.Queue()
 test_chat_id = "demo-chat"
 test_file = "test_1.mmd"
 paths = build_paths(
-    documents_dir="./data1/global/uploads",
+    documents_dir="./data/global/uploads",
     global_rag_dir="./data/global/.vector-store",
     chat_dir=f"./data/{test_chat_id}",
     uploads_dir=f"./data/{test_chat_id}/uploads",
@@ -93,12 +111,12 @@ async def worker():
             if curent_type == "message":
                 _, message, chat_id, history, params = data
                 
-                query_kwargs = {"top_k": 5}
+                query_kwargs = {"top_k": 5, "score_threshold": 0.3}
                 settings_overrides: dict[str, object] = {"temperature": 0.2}
                 if "temperature" in params:
                     settings_overrides["temperature"] = params["temperature"]
                 logger.info(f"Check folders...")
-                include_global = False
+                include_global = True
                 reset_local_rag = False
 
 
@@ -120,7 +138,7 @@ async def worker():
                     os.makedirs(path)
 
                 paths = build_paths(
-                    documents_dir="./data1/global/uploads",
+                    documents_dir="./data/global/uploads",
                     global_rag_dir="./data/global/.vector-store",
                     chat_dir=f"./data/{chat_id}",
                     uploads_dir=f"./data/{chat_id}/uploads",
@@ -129,7 +147,7 @@ async def worker():
                 # create empty small db
                 try:
                     logger.info(f"Processing message: {message}")
-                    include_global = False
+                    include_global = True
                     collection_targets = default_collection_targets(chat_id, paths=paths, include_global=include_global)
                     query_kwargs["scopes"] = collection_targets
                     logger.info(f"Databases: {query_kwargs['scopes']}")
@@ -139,7 +157,6 @@ async def worker():
                         settings=settings_overrides,
                         reset_local_rag=reset_local_rag,
                     ) as api:
-                        logger.info("Step 3/4: Ingesting uploads...")
                         logger.info("Step 4/4: Querying combined context... [1]")
                         response, context_rows = answer_with_combined_context(
                             api,
@@ -180,7 +197,7 @@ async def worker():
                     
                     # upload file to db
                     paths = build_paths(
-                        documents_dir="./data1/global/uploads",
+                        documents_dir="./data/global/uploads",
                         global_rag_dir="./data/global/.vector-store",
                         chat_dir=f"./data/{chat_id}",
                         uploads_dir=f"./data/{chat_id}/uploads",
@@ -242,7 +259,7 @@ async def receive_file(chat_id: str = Form(...), filename: str = Form(...), file
     file_location = os.path.join(path, f"{filename}")
     with open(file_location, "wb") as f:
         f.write(await file.read())
-    unarchive(file_location, path)
+    unarchive(file_location, path, f"{chat_id}")
     
 
     await task_queue.put(["file", filename, chat_id, file, include_global])

@@ -8,6 +8,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 from langchain_chroma import Chroma
 from langchain_experimental.open_clip import OpenCLIPEmbeddings
+from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
@@ -182,9 +183,10 @@ class StandardRAGPipeline(BaseRAGPipeline):
     def _initialise_embedding(
         retrieval_config: RetrievalConfigTemplate
     ) -> Embeddings:
-        model_name = retrieval_config.embedding_model_name
-        checkpoint = retrieval_config.checkpoint
-        return OpenCLIPEmbeddings(model_name=model_name, checkpoint=checkpoint)
+        return SentenceTransformerEmbeddings(
+            model_name=retrieval_config.embedding_model_name,
+            model_kwargs=retrieval_config.embedding_model_kwargs, 
+        )
 
     @staticmethod
     def _initialise_store(
@@ -432,9 +434,7 @@ class StandardRAGPipeline(BaseRAGPipeline):
 
     def query(self, question: str, history: str, **kwargs: Any) -> Dict[str, Any]:
         search_kwargs = self._build_search_kwargs(self.config_template.retrieval)
-        score_threshold = getattr(self.config_template.retrieval, "score_threshold", 0.9)
-        if score_threshold is not None:
-            search_kwargs.setdefault("score_threshold", score_threshold)
+        score_threshold = kwargs.get("score_threshold")
         base_top_k = (
             self.config_template.retrieval.text_top_k
             or self.config_template.retrieval.chunk_limit
@@ -546,7 +546,7 @@ class StandardRAGPipeline(BaseRAGPipeline):
 
         if reranker and text_context:
             chroma_documents = list(documents_for_context)
-            reranked_documents = reranker.rerank(question, chroma_documents)
+            reranked_documents = reranker.rerank(question, chroma_documents, score_threshold)
             ordered_context = self._map_documents_to_context(
                 reranked_documents,
                 chroma_documents,

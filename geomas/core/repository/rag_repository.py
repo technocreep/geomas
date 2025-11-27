@@ -124,15 +124,13 @@ class VectorStoreConfigTemplate:
 @dataclass(slots=True)
 class RetrievalConfigTemplate:
     """Retrieval section template."""
-
     top_k: int = 5
     filters: Dict[str, Any] = field(default_factory=dict)
     embedding_model_name: str | None = "all-MiniLM-L6-v2"
-    checkpoint: str | None = None
+    embedding_model_kwargs: dict[str, Any] | None = None
     final_top_k: int | None = None
     text_top_k: int | None = None
     chunk_limit: int | None = None
-    score_threshold: float | None = 0.0
     search_type: str = "similarity_score_threshold"
     search_kwargs: Dict[str, Any] = field(default_factory=dict)
 
@@ -141,7 +139,7 @@ class RetrievalConfigTemplate:
             "top_k": self.top_k,
             "filters": dict(self.filters),
             "embedding_model_name": self.embedding_model_name,
-            "checkpoint": self.checkpoint,
+            "embedding_model_kwargs": self.embedding_model_kwargs,
         }
         if self.final_top_k is not None:
             data["final_top_k"] = self.final_top_k
@@ -149,8 +147,6 @@ class RetrievalConfigTemplate:
             data["text_top_k"] = self.text_top_k
         if self.chunk_limit is not None:
             data["chunk_limit"] = self.chunk_limit
-        if self.score_threshold is not None:
-            data["score_threshold"] = self.score_threshold
         if self.search_type:
             data["search_type"] = self.search_type
         if self.search_kwargs:

@@ -60,7 +60,12 @@ class ChromaReranker:
             if isinstance(key, str)
         }
 
-    def rerank(self, query: str, documents: Sequence[Document]) -> list[Document]:
+    def rerank(
+        self, 
+        query: str, 
+        documents: Sequence[Document],
+        score_threshold: float
+    ) -> list[Document]:
         if not documents:
             return []
 
@@ -119,7 +124,8 @@ class ChromaReranker:
 
             for position, (index, document, _) in enumerate(vectorised_documents):
                 score = scores[position] if position < len(scores) else float("-inf")
-                scored_documents.append((index, document, float(score)))
+                if score >= score_threshold:
+                    scored_documents.append((index, document, float(score)))
 
         if not scored_documents:
             return self._fallback.rerank(unique_documents)

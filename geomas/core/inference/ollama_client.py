@@ -222,8 +222,8 @@ def build_ollama_rag_config(
     global_rag_dir: Path,
     local_rag_dir: Path | None = None,
     settings: OllamaSettings | None = None,
-    embedding_model_name: str = "ViT-B-32",
-    checkpoint: str = "laion2b_s34b_b79k",
+    embedding_model_name: str = "artefucktor/LaBSE_geonames_RU",
+    embedding_model_kwargs: dict[str, Any] = {"device": "cuda", "trust_remote_code": True},
 ) -> RAGConfig:
     resolved_settings = settings or load_ollama_settings()
 
@@ -243,9 +243,8 @@ def build_ollama_rag_config(
         },
         "retrieval":  {
             "top_k": 5,
-            "text_top_k": 5,
             "embedding_model_name": embedding_model_name,
-            "checkpoint": checkpoint,
+            "embedding_model_kwargs": embedding_model_kwargs,
         },
         "ranking": {
             "use_llm_reranking": False,

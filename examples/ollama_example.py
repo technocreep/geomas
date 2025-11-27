@@ -113,7 +113,7 @@ def initialize_global_rag(
             global_rag_dir=paths.get("global_rag_dir"),
             settings_overrides=settings,
         ) as api:
-            api.initialize_pipeline(paths.get("documents_dir"))
+            api.initialize_pipeline(paths.get("documents_dir"), "global")
             api.close()
 
 

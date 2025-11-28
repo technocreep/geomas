@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from typing import Any, Mapping, Sequence
 
 from bs4 import BeautifulSoup
 from langchain_core.documents import Document
-from langchain_community.document_loaders import JSONLoader
+from langchain_community.document_loaders import JSONLoader, UnstructuredExcelLoader
 
 from geomas.core.data.custom_dataloaders import LangChainDocumentLoader
 from geomas.core.rag_modules.parser.rag_parser import DocumentParser
@@ -37,7 +38,15 @@ class DataLoaderAdapter:
     TEXT_SUFFIXES = {".txt"}
     JSON_SUFFIXES = {".json", ".jsonl"}
     IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif"}
-    SUPPORTED_SUFFIXES = HTML_SUFFIXES | MARKDOWN_SUFFIXES | TEXT_SUFFIXES | JSON_SUFFIXES | IMAGE_SUFFIXES
+    EXCEL_SUFFIXES = {".xlsx", ".xls"}
+    SUPPORTED_SUFFIXES = (
+        HTML_SUFFIXES
+        | MARKDOWN_SUFFIXES
+        | TEXT_SUFFIXES
+        | JSON_SUFFIXES
+        | IMAGE_SUFFIXES
+        | EXCEL_SUFFIXES
+    )
 
     def __init__(
         self,
@@ -113,13 +122,15 @@ class DataLoaderAdapter:
 
     def _load_file(self, path: Path, document_name: str | None) -> tuple[list[Document], list[Path]]:
         suffix = path.suffix.lower()
-        resolved_name = document_name or path.stem + path.suffix
+        resolved_name = document_name or path.stem
         cleanup_paths: list[Path] = []
 
         fingerprint, last_modified, size_bytes = self._collect_file_metadata(path)
 
         if suffix in self.JSON_SUFFIXES:
             entries = self._entries_from_json(path)
+        elif suffix in self.EXCEL_SUFFIXES:
+            entries = self._entries_from_excel(path)
         elif suffix in self.HTML_SUFFIXES | self.MARKDOWN_SUFFIXES | self.TEXT_SUFFIXES:
             entries, cleanup_paths = self._entries_from_textual_file(
                 path, resolved_name, suffix
@@ -169,17 +180,61 @@ class DataLoaderAdapter:
         return fingerprint, last_modified, size_bytes
 
     def _entries_from_json(self, path: Path) -> list[tuple[str, Mapping[str, object]]]:
+        raw_documents: list[Document] | None = None
         try:
-            loader = JSONLoader(
-                file_path=path,
-                jq_schema='{page_content: .page_content, metadata: .metadata}',
-                text_content=True,
-                content_key="page_content",
-                metadata_func=lambda record, index: record["metadata"]
-            )
+            loader_kwargs = {
+                "file_path": path,
+                "jq_schema": '{page_content: .page_content, metadata: .metadata}',
+                "text_content": True,
+                "content_key": "page_content",
+                "metadata_func": lambda record, index: record["metadata"],
+            }
+            loader_kwargs.update(self.loader_params)
+            loader = JSONLoader(**loader_kwargs)
             raw_documents = list(loader.lazy_load())
         except Exception as exc:
             logger.error("Failed to load JSON document '%s': %s", path, exc)
+            raw_documents = self._fallback_json_documents(path)
+            if raw_documents is None:
+                return []
+
+        entries: list[tuple[str, Mapping[str, object]]] = []
+        for document in raw_documents:
+            metadata = dict(document.metadata or {})
+            metadata.setdefault("source", metadata.get("source_path") or str(path))
+            metadata.setdefault("source_path", str(path))
+            entries.append((str(document.page_content), metadata))
+        return entries
+
+    def _fallback_json_documents(self, path: Path) -> list[Document] | None:
+        try:
+            if path.suffix.lower() == ".jsonl":
+                raw_records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            else:
+                raw_records = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.error("Failed to parse JSON fallback for '%s': %s", path, exc)
+            return None
+
+        documents: list[Document] = []
+        for record in raw_records if isinstance(raw_records, list) else [raw_records]:
+            if not isinstance(record, Mapping):
+                continue
+            page_content = record.get("page_content") or record.get("content")
+            if page_content is None:
+                continue
+            metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+            documents.append(Document(page_content=str(page_content), metadata=dict(metadata)))
+        return documents
+
+    def _entries_from_excel(self, path: Path) -> list[tuple[str, Mapping[str, object]]]:
+        try:
+            loader_kwargs = {"file_path": str(path)}
+            loader_kwargs.update(self.loader_params)
+            loader = UnstructuredExcelLoader(**loader_kwargs)
+            raw_documents = list(loader.lazy_load())
+        except Exception as exc:
+            logger.error("Failed to load Excel document '%s': %s", path, exc)
             return []
 
         entries: list[tuple[str, Mapping[str, object]]] = []

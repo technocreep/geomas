@@ -220,13 +220,14 @@ def main() -> None:
     query_kwargs: dict[str, int] = {
         "top_k": 5,
         "query_images": False,
+        "score_threshold": 0.4,
     }
     settings_overrides: dict[str, object] = {"temperature": 0.1}
 
     chat_id = "demo-chat"
-    include_global = True
+    include_global = False
     reset_local_rag = True
-    describe_images = True
+    describe_images = False
     paths = build_paths(
         documents_dir="./data/global/uploads",
         global_rag_dir="./data/global/.vector-store",

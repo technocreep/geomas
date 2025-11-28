@@ -21,7 +21,9 @@ dependencies = [
     "unsloth",
     "ollama",
     "langchain_chroma",
-    "jq",
+    "openpyxl",
+    "xlrd",
+    "unstructured==0.16.17",
 ]
 
 [tool.setuptools]

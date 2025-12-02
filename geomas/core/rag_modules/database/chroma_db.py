@@ -81,7 +81,8 @@ class DatabaseRagPipeline:
             path, document_name=document_name, namespace=namespace
         )
         description_documents = self._describe_images(
-            image_documents,
+            # TODO: unlimit this if describing will speed up
+            image_documents[:3] or image_documents[:2] or image_documents,
             namespace=namespace,
             enabled=generate_image_descriptions,
         )

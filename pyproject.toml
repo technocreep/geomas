@@ -15,7 +15,15 @@ dependencies = [
     "boto3",
     "dotenv",
     "google-generativeai",
-    "tenacity"
+    "tenacity",
+    "langchain_experimental",
+    "open_clip_torch",
+    "unsloth",
+    "ollama",
+    "langchain_chroma",
+    "openpyxl",
+    "xlrd",
+    "unstructured==0.16.17",
 ]
 
 [tool.setuptools]

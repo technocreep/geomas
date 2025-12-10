@@ -124,9 +124,8 @@ class VisualDataProcessor:
                     "image_path": str(img_path),
                     "image_name": img_path.name,
                     "type": "visual",
-                    "document_type": "geological_map",
-                    "description": description
-                }
+                    "document_type": "geological_map"
+                    }
                 
                 if metadata:
                     doc_metadata.update(metadata)

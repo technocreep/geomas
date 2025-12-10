@@ -14,7 +14,7 @@ from langchain_core.messages import HumanMessage
 
 from geomas.core.logging.logger import get_logger
 from geomas.core.repository.constant_repository import VISION_LLM_URL
-
+from geomas.core.config.prompt_manager import PromptManager
 if TYPE_CHECKING:
     from geomas.core.inference.interface import LlmConnector
 
@@ -139,7 +139,8 @@ class VLMProcessor:
             Textual description of the image.
         """
         self._init_model()
-        
+        pm = PromptManager()
+        image_ocr = pm.render("image_ocr")
         # Check if image exists
         if not Path(image_path).exists():
             raise FileNotFoundError(f"Image not found: {image_path}")
@@ -147,22 +148,9 @@ class VLMProcessor:
         # Use default geological prompt if not provided
         if prompt_template is None:
             if detailed:
-                sys_prompt = (
-                    "Это геологическая карта или схема из геологического документа. "
-                    "Опиши детально все видимые элементы: типы пород, структуры, разломы, "
-                    "зоны минерализации, геологические объекты, легенду карты, масштаб, "
-                    "направления и любые другие геологические особенности. "
-                    "Будь максимально подробным и точным. "
-                    "Используй только информацию, видимую на изображении, ничего не выдумывай."
-                )
+                sys_prompt = image_ocr['system']
             else:
-                sys_prompt = (
-                    "Это геологическая карта или схема из геологического документа. "
-                    "Опиши кратко основные элементы: типы пород, структуры, разломы, "
-                    "геологические объекты и другие особенности. "
-                    "Будь лаконичным, но информативным. "
-                    "Используй только информацию, видимую на изображении."
-                )
+                sys_prompt = image_ocr['system_detailed']
         else:
             sys_prompt = prompt_template
         

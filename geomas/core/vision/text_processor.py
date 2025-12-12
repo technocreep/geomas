@@ -3,6 +3,8 @@ import re
 import json
 from collections import defaultdict
 from geomas.core.vision.generate_final_description import generate_final_description
+from geomas.core.logging.logger import get_logger
+logger = get_logger("VISUAL_DATA_PROCESSOR")
 
 class TextProcessor:
     """
@@ -12,23 +14,14 @@ class TextProcessor:
     - собирает контекст вокруг ссылок на рисунки
     - сохраняет результат в JSON
     """
-
-    # ---------------------------------------------------------
-    #                 ИНИЦИАЛИЗАЦИЯ
-    # ---------------------------------------------------------
-    def __init__(self, path, context_window=1):
-        """
-        context_window: количество предложений вокруг упоминания рисунка,
-                        включаемых в контекст.
-        """
-        self.context_window = context_window
+    def __init__(self, path):
         self.root_path = path
 
-    # ---------------------------------------------------------
-    #          1) Извлечение подписей из det.mmd
-    # ---------------------------------------------------------
-    def extract_figures_from_file1(self, file1_path):
-        """从文件1提取 {fig_num: caption}"""
+    
+    def extract_from_detmmd(self, file1_path):
+        """
+        Извлечение подписей из det.mmd
+        """
         with open(file1_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
@@ -59,10 +52,11 @@ class TextProcessor:
                 i += 1
         return fig_to_caption_f1
     
-    # ---------------------------------------------------------
-    #          2) Извлечение изображений/подписей из *.mmd
-    # ---------------------------------------------------------
-    def extract_from_file2(self, file2_path, fig_cap_f1):
+
+    def extract_from_mmd(self, file2_path, fig_cap_f1):
+        """
+        Извлечение изображений/подписей из *.mmd
+        """
         with open(file2_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
@@ -82,7 +76,7 @@ class TextProcessor:
                 if not line:
                     continue
 
-                # 1) 图片
+                # 1) image
                 img_match = img_pattern.search(line)
                 if img_match:
                     pending_images.append("images/" + img_match.group(1))
@@ -129,18 +123,16 @@ class TextProcessor:
         return fig_data, fig_to_context
 
 
-    # ---------------------------------------------------------
-    #                    3) Основная обработка
-    # ---------------------------------------------------------
+   
     def process_pair(self, file1_path, file2_path, output_path, image_meta_map, root):
         """
         Обрабатывает пару (det.mmd, mmd) и сохраняет JSON.
         """
         # Подписи из det.mmd
-        fig_cap_f1 = self.extract_figures_from_file1(file1_path)
+        fig_cap_f1 = self.extract_from_detmmd(file1_path)
 
         # Извлечение изображений и контекста
-        fig_data, _ = self.extract_from_file2(file2_path, fig_cap_f1)
+        fig_data, _ = self.extract_from_mmd(file2_path, fig_cap_f1)
 
         # Заполняем отсутствующие подписи
         for fig_num, data in fig_data.items():
@@ -166,13 +158,13 @@ class TextProcessor:
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
 
-        print(f"✅ Готово: {output_path} ({len(result)} записей)")
+        logger.info(f"✅ Готово: {output_path} ({len(result)} записей)")
         return output_path
 
 
     def build_image_metadata_map(self, base_dir):
         """
-        构建 { (relative_folder_path, image_name): metadata } 映射
+        Constuct { (relative_folder_path, image_name): metadata } mapping
         """
         img_meta = {}
         base_dir = os.path.abspath(base_dir)
@@ -188,14 +180,12 @@ class TextProcessor:
                                 image_path = data.get("metadata", {}).get("image_path",{})
                                 img_meta[image_path] = data.get("metadata", {})
                         except Exception as e:
-                            print(f"⚠️ 读取 image metadata 失败: {path}: {e}")
+                            logger.info(f"⚠️ Read image metadata failed: {path}: {e}")
         return img_meta
 
 
 
-    # ---------------------------------------------------------
-    #          4) Обработка всех подпапок в каталоге
-    # ---------------------------------------------------------
+
     def process_all_folders(self):
         """
         Находит все *_det.mmd и соответствующие *.mmd,
@@ -204,7 +194,7 @@ class TextProcessor:
         image_meta_map = self.build_image_metadata_map(self.root_path)
         for root, dirs, files in os.walk(self.root_path):
             det_files = [f for f in files if f.endswith("_det.mmd")]
-            print(root)
+            logger.info(root)
             for det_file in det_files:
                 prefix = det_file[:-8]  # удаляем "_det.mmd"
                 mmd_file = f"{prefix}.mmd"
@@ -213,19 +203,18 @@ class TextProcessor:
 
                 if os.path.exists(mmd_path):
                     out_path = os.path.join(root, f"{prefix}.json")
-                    print(f"🚀 Обработка: {prefix}")
+                    logger.info(f"🚀 Обработка: {prefix}")
                     try:
                         output_json=self.process_pair(det_path, mmd_path, out_path, image_meta_map, root)
                         generate_final_description(output_json)
                     except Exception as e:
-                        print(f"❌ Ошибка при обработке {prefix}: {e}")
+                        logger.info(f"❌ Ошибка при обработке {prefix}: {e}")
                 else:
-                    print(f"⚠️ Не найден файл {mmd_file} для {det_file}")
+                    logger.info(f"⚠️ Не найден файл {mmd_file} для {det_file}")
                     
     
 
-# ----------------------- ПУСК -----------------------
 if __name__ == "__main__":
-    extractor = TextProcessor(context_window=1)
     base_folder = "/home/hyl/rag/vlm/geo_sources_stage_1_ocr_result"
-    extractor.process_all_folders(base_folder)
+    extractor = TextProcessor(base_folder)
+    extractor.process_all_folders()

@@ -25,7 +25,8 @@ import typer
 from geomas.core.logging.logger import get_logger
 from geomas.core.rag_modules.convertation.pdf_to_json import process_folder
 from geomas.core.utils import ALLOWED_MODELS, PROJECT_PATH
-
+from pathlib import Path
+from geomas.core.vision.visual_data_processor import VisualDataProcessor
 app = typer.Typer(help="GEOMAS: CLI tool for LLM Training")
 logger = get_logger()
 
@@ -414,8 +415,7 @@ def describe_image(
     text (for example, to embed it in a vector store). CLI invocations keep the
     existing stdout behaviour.
     """
-    from pathlib import Path
-    from geomas.core.vision.visual_data_processor import VisualDataProcessor
+    
 
     img_path = Path(image_path)
     if not img_path.exists():
@@ -447,6 +447,42 @@ def describe_image(
         raise
 
     return description
+
+@app.command()
+def get_image_ds(
+    folder_path: str = typer.Argument(help="Path to image file"),
+    detailed: bool = typer.Option(
+        False,
+        help="Generate detailed descriptions (slower but more informative)"
+    ),
+    output: str | None = typer.Option(
+        "",
+        help="Optional: Save description to file"
+    ),
+):
+    """Generate and optionally persist a textual description of an image.
+
+    Returns the generated description so programmatic callers can reuse the
+    text (for example, to embed it in a vector store). CLI invocations keep the
+    existing stdout behaviour.
+    """
+    from pathlib import Path
+    from geomas.core.vision.text_processor import TextProcessor
+
+    img_path = Path(folder_path)
+    if not img_path.exists():
+        logger.error(f"Folder not found: {folder_path}")
+        return
+    visual_pro = VisualDataProcessor(detailed_descriptions=detailed)
+    # Process documents
+    documents = visual_pro.process_visual_documents(
+        document_dir=str(img_path),
+        source_name=img_path.name
+    )
+    text_pro=TextProcessor(img_path)
+    text_pro.process_all_folders()
+    logger.info(f"Generating caption for: {folder_path}")
+    
 
 
 @app.command()
